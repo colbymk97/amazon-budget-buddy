@@ -1,0 +1,4 @@
+transaction_id,posted_date,amount,merchant_raw,description,currency
+txn_001,2026-02-01,-42.99,AMAZON MKTPLACE PMTS,Order charge,USD
+txn_002,2026-02-03,-15.50,AMAZON DIGITAL,Kindle charge,USD
+txn_003,2026-02-05,-20.00,STARBUCKS,Coffee,USD

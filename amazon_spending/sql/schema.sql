@@ -1,0 +1,142 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS orders (
+    order_id TEXT PRIMARY KEY,
+    order_date TEXT NOT NULL,
+    order_url TEXT,
+    order_total_cents INTEGER NOT NULL,
+    tax_cents INTEGER,
+    shipping_cents INTEGER,
+    payment_last4 TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS shipments (
+    shipment_id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    ship_date TEXT,
+    shipment_total_cents INTEGER NOT NULL,
+    status TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(order_id) REFERENCES orders(order_id)
+);
+
+CREATE TABLE IF NOT EXISTS amazon_transactions (
+    amazon_txn_id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    transaction_tag TEXT,
+    txn_date TEXT,
+    amount_cents INTEGER,
+    payment_last4 TEXT,
+    raw_label TEXT,
+    source_url TEXT,
+    budget_category_id INTEGER,
+    budget_subcategory_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(order_id) REFERENCES orders(order_id),
+    FOREIGN KEY(budget_category_id) REFERENCES budget_categories(category_id),
+    FOREIGN KEY(budget_subcategory_id) REFERENCES budget_subcategories(subcategory_id)
+);
+
+CREATE TABLE IF NOT EXISTS budget_categories (
+    category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS budget_subcategories (
+    subcategory_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    category_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(category_id) REFERENCES budget_categories(category_id),
+    UNIQUE(category_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS order_items (
+    item_id TEXT PRIMARY KEY,
+    order_id TEXT NOT NULL,
+    shipment_id TEXT,
+    amazon_transaction_id TEXT,
+    title TEXT NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    item_subtotal_cents INTEGER NOT NULL,
+    item_tax_cents INTEGER,
+    essential_flag INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(order_id) REFERENCES orders(order_id),
+    FOREIGN KEY(shipment_id) REFERENCES shipments(shipment_id),
+    FOREIGN KEY(amazon_transaction_id) REFERENCES amazon_transactions(amazon_txn_id)
+);
+
+CREATE TABLE IF NOT EXISTS order_item_transactions (
+    item_id TEXT NOT NULL,
+    amazon_txn_id TEXT NOT NULL,
+    allocated_amount_cents INTEGER,
+    method TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (item_id, amazon_txn_id),
+    FOREIGN KEY(item_id) REFERENCES order_items(item_id),
+    FOREIGN KEY(amazon_txn_id) REFERENCES amazon_transactions(amazon_txn_id)
+);
+
+CREATE TABLE IF NOT EXISTS transactions (
+    txn_id TEXT PRIMARY KEY,
+    posted_date TEXT NOT NULL,
+    amount_cents INTEGER NOT NULL,
+    merchant_raw TEXT NOT NULL,
+    description TEXT,
+    currency TEXT NOT NULL DEFAULT 'USD',
+    account_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS matches (
+    match_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    txn_id TEXT NOT NULL,
+    order_id TEXT,
+    shipment_id TEXT,
+    item_id TEXT,
+    allocated_amount_cents INTEGER NOT NULL,
+    confidence REAL NOT NULL,
+    method TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(txn_id) REFERENCES transactions(txn_id),
+    FOREIGN KEY(order_id) REFERENCES orders(order_id),
+    FOREIGN KEY(shipment_id) REFERENCES shipments(shipment_id),
+    FOREIGN KEY(item_id) REFERENCES order_items(item_id)
+);
+
+CREATE TABLE IF NOT EXISTS manual_overrides (
+    override_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_txn_id TEXT NOT NULL,
+    selected_order_id TEXT,
+    selected_item_id TEXT,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY(target_txn_id) REFERENCES transactions(txn_id),
+    FOREIGN KEY(selected_order_id) REFERENCES orders(order_id),
+    FOREIGN KEY(selected_item_id) REFERENCES order_items(item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_order_id ON shipments(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_shipment_id ON order_items(shipment_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_amazon_txn_id ON order_items(amazon_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_amazon_transactions_order_id ON amazon_transactions(order_id);
+CREATE INDEX IF NOT EXISTS idx_amazon_transactions_budget_category_id ON amazon_transactions(budget_category_id);
+CREATE INDEX IF NOT EXISTS idx_amazon_transactions_budget_subcategory_id ON amazon_transactions(budget_subcategory_id);
+CREATE INDEX IF NOT EXISTS idx_order_item_transactions_item ON order_item_transactions(item_id);
+CREATE INDEX IF NOT EXISTS idx_order_item_transactions_txn ON order_item_transactions(amazon_txn_id);
+CREATE INDEX IF NOT EXISTS idx_transactions_posted_date ON transactions(posted_date);
+CREATE INDEX IF NOT EXISTS idx_matches_txn_id ON matches(txn_id);
+CREATE INDEX IF NOT EXISTS idx_budget_subcategories_category_id ON budget_subcategories(category_id);

@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# local data artifacts
+data/
+reports/
+.run/
+.run_logs/
+*.log
+
+# macOS
+.DS_Store
+
+# frontend local artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.tsbuildinfo
+
+# env files
+.env
+.env.*
