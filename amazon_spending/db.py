@@ -110,6 +110,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE retailer_transactions ADD COLUMN retailer TEXT NOT NULL DEFAULT 'amazon'"
             )
+        if "actual_synced_at" not in txn_cols:
+            conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_synced_at TEXT")
 
     conn.executescript(
         """

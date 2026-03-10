@@ -1,0 +1,8 @@
+{
+  "actual_budget": {
+    "base_url": "http://localhost:5006",
+    "password": "your-actual-budget-password",
+    "file": "My Budget",
+    "account_name": null
+  }
+}

@@ -112,6 +112,32 @@ note:
   The new React UI can be launched separately via the API server — see README.
 """
 
+_ACTUAL_SYNC_EPILOG = """
+prerequisites:
+  pip install actualpy                         # or: pip install "amazon-spending[actual]"
+  cp config.example.json data/config.json     # then edit with your Actual credentials
+
+examples:
+  # Preview matches without writing any changes
+  amazon-spending actual-sync --dry-run
+
+  # Sync all unsynced retailer transactions to Actual Budget
+  amazon-spending actual-sync
+
+  # Sync using a custom config file
+  amazon-spending actual-sync --config /path/to/config.json
+
+  # Machine-readable output
+  amazon-spending actual-sync --json
+
+notes:
+  - Only transactions with actual_synced_at IS NULL are processed.
+  - Each transaction is matched by exact amount (±$0) within ±3 days of txn_date.
+  - The first matching Actual transaction has its notes appended with the
+    Amazon order ID and allocated line-items.
+  - Synced transactions are never re-processed.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Shared collect flags — used by both `collect` and the legacy `collect-amazon`
@@ -394,6 +420,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port for the viewer server (default: 8501)",
     )
 
+    # ------------------------------------------------------------ actual-sync
+    p_actual = sub.add_parser(
+        "actual-sync",
+        help="Push unsynced retailer transactions to an Actual Budget instance",
+        description=(
+            "Matches each unsynced retailer transaction to an Actual Budget\n"
+            "transaction by exact amount and date (±3 days), then appends the\n"
+            "Amazon order ID and line-items to that transaction's notes field.\n"
+            "\n"
+            "Requires actualpy: pip install actualpy\n"
+            "Requires data/config.json — see config.example.json for the format."
+        ),
+        formatter_class=_Formatter,
+        epilog=_ACTUAL_SYNC_EPILOG,
+    )
+    p_actual.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview matches without writing anything to Actual Budget or the local DB",
+    )
+    p_actual.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to config.json (default: data/config.json)",
+    )
+    p_actual.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
     return parser
 
 
@@ -521,6 +581,40 @@ def _handle_export(args: argparse.Namespace, conn) -> None:
         print(f"  {path.name}  ({size} bytes)")
 
 
+def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
+    from .actual_sync import DEFAULT_CONFIG_PATH, load_config, sync_to_actual
+
+    config_path = args.config or DEFAULT_CONFIG_PATH
+    cfg = load_config(config_path)
+    if cfg is None:
+        print(
+            f"Error: Actual Budget is not configured.\n"
+            f"Expected config file: {config_path}\n"
+            f"Copy config.example.json to data/config.json and fill in your credentials.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        result = sync_to_actual(conn, cfg, dry_run=args.dry_run)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_json:
+        print(json.dumps({"dry_run": args.dry_run, **result.to_dict()}, indent=2))
+        return
+
+    mode = " (dry run)" if args.dry_run else ""
+    print(f"Actual Budget sync{mode}: {cfg.base_url} / {cfg.file!r}")
+    print(f"  synced:    {result.synced}")
+    print(f"  no match:  {result.no_match}")
+    if result.errors:
+        print(f"  errors:    {len(result.errors)}")
+        for err in result.errors:
+            print(f"    - {err}")
+
+
 def _handle_view(args: argparse.Namespace, conn) -> None:
     try:
         import streamlit  # noqa: F401
@@ -577,6 +671,8 @@ def main() -> None:
             _handle_export(args, conn)
         elif args.command == "view":
             _handle_view(args, conn)
+        elif args.command == "actual-sync":
+            _handle_actual_sync(args, conn)
         else:
             parser.error(f"Unknown command: {args.command}")
     finally:

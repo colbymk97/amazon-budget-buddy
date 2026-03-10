@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS retailer_transactions (
     source_url TEXT,
     budget_category_id INTEGER,
     budget_subcategory_id INTEGER,
+    actual_synced_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(order_id) REFERENCES orders(order_id),
