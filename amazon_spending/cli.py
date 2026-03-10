@@ -6,12 +6,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .collector import collect_amazon
 from .db import DEFAULT_DB_PATH, connect, init_db
 from .exporter import export_reports
 from .importers import import_transactions_csv
+from .retailers import REGISTRY
 
 VERSION = "0.1.0"
+_RETAILER_CHOICES = sorted(REGISTRY.keys())
 
 # ---------------------------------------------------------------------------
 # Shared formatter: wider help columns for long flag names
@@ -37,31 +38,33 @@ examples:
 
 _COLLECT_EPILOG = """
 examples:
-  # Collect the most recent 50 orders (headless browser, auto-auth fallback)
-  amazon-spending collect-amazon --order-limit 50
+  # Collect the most recent 50 Amazon orders (headless, auto-auth fallback)
+  amazon-spending collect --retailer amazon --order-limit 50
 
-  # Collect everything from a specific date range
-  amazon-spending collect-amazon --start-date 2024-01-01 --end-date 2024-06-30
+  # Collect a specific date range
+  amazon-spending collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
 
   # Force a visible browser window (useful for first-time login / MFA)
-  amazon-spending collect-amazon --headed --order-limit 20
+  amazon-spending collect --retailer amazon --headed --order-limit 20
 
   # Re-parse previously saved HTML without launching a browser
-  amazon-spending collect-amazon --test-run
+  amazon-spending collect --retailer amazon --test-run
 
   # Re-parse a specific saved snapshot directory
-  amazon-spending collect-amazon --saved-run-dir data/raw/amazon/20260216_081306
+  amazon-spending collect --retailer amazon --saved-run-dir data/raw/amazon/20260216_081306
 
-  # Limit the scan depth and store raw HTML somewhere custom
-  amazon-spending collect-amazon --order-limit 200 --max-pages 10 --outdir /tmp/amazon-raw
+  # Fastest incremental sync — stop when known orders are encountered
+  amazon-spending collect --retailer amazon --stop-on-known
+
+  # Machine-readable JSON output
+  amazon-spending collect --retailer amazon --order-limit 10 --json
 
 notes:
-  - The collector saves raw HTML under --outdir/<timestamp>/ before parsing.
-  - Headless mode falls back to a headed window automatically when Amazon
-    requires interactive login or MFA.
-  - Use --stop-on-known to end the scan as soon as a previously imported
-    order is encountered (fastest for incremental syncs).
+  - Raw HTML is saved under --outdir/<timestamp>/ before parsing.
+  - Headless mode falls back automatically when the retailer requires
+    interactive login or MFA.
   - --saved-run-dir implies --test-run automatically.
+  - Deprecated alias: collect-amazon (same as collect --retailer amazon)
 """
 
 _IMPORT_EPILOG = """
@@ -111,6 +114,109 @@ note:
 
 
 # ---------------------------------------------------------------------------
+# Shared collect flags — used by both `collect` and the legacy `collect-amazon`
+# ---------------------------------------------------------------------------
+
+def _add_collect_args(p: argparse.ArgumentParser) -> None:
+    """Attach all collect flags to a parser (shared between collect and collect-amazon)."""
+
+    # Date / scope
+    p.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Earliest order date to collect (inclusive)",
+    )
+    p.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Latest order date to collect (inclusive)",
+    )
+    p.add_argument(
+        "--order-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum number of orders to collect per run",
+    )
+    p.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Maximum listing pages to traverse "
+            "(default: derived from --order-limit when provided)"
+        ),
+    )
+
+    # Browser options
+    browser_group = p.add_argument_group("browser options")
+    browser_group.add_argument(
+        "--headed",
+        action="store_true",
+        help="Force a visible browser window (default: headless with auto-auth fallback)",
+    )
+    browser_group.add_argument(
+        "--user-data-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Persistent browser profile directory for session cookies "
+            "(default: data/raw/<retailer>/browser_profile)"
+        ),
+    )
+
+    # Storage / offline options
+    storage_group = p.add_argument_group("storage options")
+    storage_group.add_argument(
+        "--outdir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Directory for raw HTML snapshots (default: data/raw/<retailer>)",
+    )
+    storage_group.add_argument(
+        "--test-run",
+        action="store_true",
+        help="Parse a previously saved HTML snapshot without launching the browser",
+    )
+    storage_group.add_argument(
+        "--saved-run-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Specific snapshot directory to parse (implies --test-run; "
+            "default: latest under --outdir)"
+        ),
+    )
+
+    # Incremental sync
+    sync_group = p.add_argument_group("incremental sync options")
+    sync_group.add_argument(
+        "--stop-on-known",
+        action="store_true",
+        help=(
+            "Stop scanning as soon as a previously imported order ID is encountered "
+            "(fastest for incremental syncs)"
+        ),
+    )
+
+    # Output
+    p.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
 
@@ -118,11 +224,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="amazon-spending",
         description=(
-            "amazon-spending — local-first Amazon order history collector and budget tool.\n"
+            "amazon-spending — local-first retailer order collector and budget tool.\n"
             "\n"
-            "Scrapes your Amazon order history into a local SQLite database, imports\n"
-            "bank/card transactions, and exports reconciliation reports. All data stays\n"
-            "on your machine — no cloud services required."
+            "Scrapes order history from supported retailers into a local SQLite database,\n"
+            "imports bank/card transactions, and exports reconciliation reports. All data\n"
+            "stays on your machine — no cloud services required.\n"
+            "\n"
+            f"supported retailers: {', '.join(_RETAILER_CHOICES)}"
         ),
         formatter_class=_Formatter,
         epilog=(
@@ -130,7 +238,7 @@ def build_parser() -> argparse.ArgumentParser:
             "\n"
             "quick start:\n"
             "  amazon-spending init-db\n"
-            "  amazon-spending collect-amazon --order-limit 100\n"
+            "  amazon-spending collect --retailer amazon --order-limit 100\n"
             "  amazon-spending view\n"
         ),
     )
@@ -163,115 +271,38 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_INIT_DB_EPILOG,
     )
 
-    # --------------------------------------------------------- collect-amazon
+    # ----------------------------------------------------------------- collect
     p_collect = sub.add_parser(
-        "collect-amazon",
-        help="Scrape Amazon order history into the local database",
+        "collect",
+        help="Scrape retailer order history into the local database",
         description=(
-            "Launches a Playwright browser to collect Amazon orders, shipments,\n"
-            "line items, and payment transactions, then reconciles them into the\n"
-            "local SQLite database.\n"
+            "Launches a browser to collect orders, shipments, line items, and\n"
+            "payment transactions for the specified retailer, then reconciles them\n"
+            "into the local SQLite database.\n"
             "\n"
-            "The collector runs headless by default and falls back to a visible\n"
-            "browser window automatically when Amazon requires interactive login\n"
-            "or MFA. A persistent browser profile is reused across runs so you\n"
-            "only need to log in once."
+            f"supported retailers: {', '.join(_RETAILER_CHOICES)}"
         ),
         formatter_class=_Formatter,
         epilog=_COLLECT_EPILOG,
     )
-
-    # Date / scope
     p_collect.add_argument(
-        "--start-date",
-        type=str,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Earliest order date to collect (inclusive)",
+        "--retailer",
+        required=True,
+        choices=_RETAILER_CHOICES,
+        metavar="NAME",
+        help=f"Retailer to collect from: {{{', '.join(_RETAILER_CHOICES)}}}",
     )
-    p_collect.add_argument(
-        "--end-date",
-        type=str,
-        default=None,
-        metavar="YYYY-MM-DD",
-        help="Latest order date to collect (inclusive)",
-    )
-    p_collect.add_argument(
-        "--order-limit",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Maximum number of orders to collect per run",
-    )
-    p_collect.add_argument(
-        "--max-pages",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Maximum listing pages to traverse "
-            "(default: derived from --order-limit when provided)"
-        ),
-    )
+    _add_collect_args(p_collect)
 
-    # Browser options
-    browser_group = p_collect.add_argument_group("browser options")
-    browser_group.add_argument(
-        "--headed",
-        action="store_true",
-        help="Force a visible browser window (default: headless with auto-auth fallback)",
+    # -------------------------------------------- collect-amazon (legacy alias)
+    p_collect_amazon = sub.add_parser(
+        "collect-amazon",
+        help="[deprecated] Alias for: collect --retailer amazon",
+        description="Deprecated alias for 'collect --retailer amazon'. Use collect instead.",
+        formatter_class=_Formatter,
+        epilog=_COLLECT_EPILOG,
     )
-    browser_group.add_argument(
-        "--user-data-dir",
-        type=Path,
-        default=Path("data/raw/amazon/browser_profile"),
-        metavar="PATH",
-        help="Persistent browser profile directory for session cookies (default: data/raw/amazon/browser_profile)",
-    )
-
-    # Storage / offline options
-    storage_group = p_collect.add_argument_group("storage options")
-    storage_group.add_argument(
-        "--outdir",
-        type=Path,
-        default=Path("data/raw/amazon"),
-        metavar="PATH",
-        help="Directory for raw HTML snapshots (default: data/raw/amazon)",
-    )
-    storage_group.add_argument(
-        "--test-run",
-        action="store_true",
-        help="Parse a previously saved HTML snapshot without launching the browser",
-    )
-    storage_group.add_argument(
-        "--saved-run-dir",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help=(
-            "Specific snapshot directory to parse (implies --test-run; "
-            "default: latest under --outdir)"
-        ),
-    )
-
-    # Incremental sync
-    sync_group = p_collect.add_argument_group("incremental sync options")
-    sync_group.add_argument(
-        "--stop-on-known",
-        action="store_true",
-        help=(
-            "Stop scanning as soon as a previously imported order ID is encountered "
-            "(fastest for incremental syncs)"
-        ),
-    )
-
-    # Output
-    p_collect.add_argument(
-        "--json",
-        dest="output_json",
-        action="store_true",
-        help="Print results as a JSON object instead of plain text",
-    )
+    _add_collect_args(p_collect_amazon)
 
     # ------------------------------------------------------ import-transactions
     p_import = sub.add_parser(
@@ -279,7 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Import bank/card transactions from a CSV file",
         description=(
             "Reads a CSV file of bank or credit-card transactions and upserts\n"
-            "them into the local database for future reconciliation with Amazon\n"
+            "them into the local database for future reconciliation with retailer\n"
             "orders. Existing rows are updated on conflict; no duplicates are\n"
             "created for the same transaction_id."
         ),
@@ -315,7 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Generates three CSV reports from the local database:\n"
             "\n"
             "  • report_transaction_itemized.csv — each transaction matched\n"
-            "    to its Amazon order line items\n"
+            "    to its retailer order line items\n"
             "  • report_unmatched.csv — transactions with no order match\n"
             "  • report_monthly_summary.csv — monthly totals by essential flag"
         ),
@@ -370,19 +401,25 @@ def build_parser() -> argparse.ArgumentParser:
 # Command handlers
 # ---------------------------------------------------------------------------
 
-def _handle_collect(args: argparse.Namespace, conn) -> None:
+def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
+    collector = REGISTRY[retailer_id]
+
+    # Retailer-namespaced defaults for outdir and user-data-dir
+    outdir = args.outdir or Path(f"data/raw/{retailer_id}")
+    user_data_dir = args.user_data_dir or Path(f"data/raw/{retailer_id}/browser_profile")
+
     # --saved-run-dir implies --test-run
     test_run = args.test_run or (args.saved_run_dir is not None)
 
-    result = collect_amazon(
+    result = collector.collect(
         conn=conn,
-        output_dir=args.outdir,
+        output_dir=outdir,
         start_date=args.start_date,
         end_date=args.end_date,
         order_limit=args.order_limit,
         max_pages=args.max_pages,
         headless=not args.headed,
-        user_data_dir=args.user_data_dir,
+        user_data_dir=user_data_dir,
         test_run=test_run,
         saved_run_dir=args.saved_run_dir,
         stop_when_before_start_date=args.stop_on_known,
@@ -390,6 +427,7 @@ def _handle_collect(args: argparse.Namespace, conn) -> None:
 
     if args.output_json:
         data = {
+            "retailer": retailer_id,
             "status": result.status,
             "notes": result.notes,
             "orders_collected": result.orders_collected,
@@ -414,7 +452,7 @@ def _handle_collect(args: argparse.Namespace, conn) -> None:
                     "unchanged": result.items_unchanged,
                     "deleted": result.items_deleted,
                 },
-                "amazon_transactions": {
+                "retailer_transactions": {
                     "inserted": result.amazon_txns_inserted,
                     "updated": result.amazon_txns_updated,
                     "unchanged": result.amazon_txns_unchanged,
@@ -426,7 +464,8 @@ def _handle_collect(args: argparse.Namespace, conn) -> None:
         print(json.dumps(data, indent=2))
         return
 
-    print(f"status: {result.status}")
+    print(f"retailer:   {retailer_id}")
+    print(f"status:     {result.status}")
     print(result.notes)
     if result.orders_collected or result.items_collected:
         print(f"\ncollected:  {result.orders_collected} orders, {result.items_collected} items")
@@ -450,7 +489,7 @@ def _handle_collect(args: argparse.Namespace, conn) -> None:
             f"  deleted={result.items_deleted}"
         )
         print(
-            f"  amazon txns  inserted={result.amazon_txns_inserted}"
+            f"  txns         inserted={result.amazon_txns_inserted}"
             f"  updated={result.amazon_txns_updated}"
             f"  unchanged={result.amazon_txns_unchanged}"
             f"  deleted={result.amazon_txns_deleted}"
@@ -502,7 +541,7 @@ def _handle_view(args: argparse.Namespace, conn) -> None:
         str(args.port),
         "--",
         "--db",
-        str(conn.execute("PRAGMA database_list").fetchone()[2]),  # resolve actual path
+        str(conn.execute("PRAGMA database_list").fetchone()[2]),
     ]
     print(f"Starting viewer at http://{args.host}:{args.port}")
     print("Press Ctrl+C to stop.")
@@ -527,8 +566,11 @@ def main() -> None:
 
         if args.command == "init-db":
             print(f"Database initialized at {args.db}")
+        elif args.command == "collect":
+            _handle_collect(args, conn, args.retailer)
         elif args.command == "collect-amazon":
-            _handle_collect(args, conn)
+            # Legacy alias — behaves exactly like collect --retailer amazon
+            _handle_collect(args, conn, "amazon")
         elif args.command == "import-transactions":
             _handle_import(args, conn)
         elif args.command == "export":

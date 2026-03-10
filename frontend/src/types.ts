@@ -1,5 +1,6 @@
 export type Order = {
   order_id: string;
+  retailer?: string;
   order_date: string;
   order_url?: string | null;
   order_total_cents: number;
@@ -10,8 +11,9 @@ export type Order = {
   txn_count?: number;
 };
 
-export type AmazonTransaction = {
-  amazon_txn_id: string;
+export type RetailerTransaction = {
+  retailer_txn_id: string;
+  retailer?: string;
   order_id: string;
   order_date?: string | null;
   order_url?: string | null;
@@ -30,6 +32,9 @@ export type AmazonTransaction = {
   budget_subcategory_name?: string | null;
 };
 
+/** @deprecated Use RetailerTransaction */
+export type AmazonTransaction = RetailerTransaction & { amazon_txn_id?: string };
+
 export type OrderItem = {
   item_id: string;
   order_id: string;
@@ -39,7 +44,7 @@ export type OrderItem = {
   quantity: number;
   item_subtotal_cents: number;
   item_tax_cents?: number | null;
-  amazon_transaction_id?: string | null;
+  retailer_transaction_id?: string | null;
   order_total_cents?: number | null;
   tax_cents?: number | null;
   allocated_amount_cents?: number | null;

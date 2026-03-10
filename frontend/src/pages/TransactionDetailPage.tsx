@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { formatMoney, getTransaction, getTransactionItems } from "../api";
-import type { AmazonTransaction, OrderItem } from "../types";
+import type { RetailerTransaction, OrderItem } from "../types";
 
 export function TransactionDetailPage() {
   const { txnId = "" } = useParams();
-  const [txn, setTxn] = useState<AmazonTransaction | null>(null);
+  const [txn, setTxn] = useState<RetailerTransaction | null>(null);
   const [items, setItems] = useState<OrderItem[]>([]);
 
   useEffect(() => {
@@ -25,7 +25,7 @@ export function TransactionDetailPage() {
         <article className="panel order-summary-card">
           <h2>Transaction Summary</h2>
           <p>
-            <strong>Transaction ID:</strong> {txn.amazon_txn_id}
+            <strong>Transaction ID:</strong> {txn.retailer_txn_id}
           </p>
           <p>
             <strong>Date:</strong> {txn.txn_date ?? "n/a"}

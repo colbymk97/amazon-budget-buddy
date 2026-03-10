@@ -10,15 +10,15 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from .collector import collect_amazon
 from .db import connect, init_db
+from .retailers import REGISTRY
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_API_DB_PATH = PROJECT_ROOT / "data/amazon_spending.sqlite3"
 DEFAULT_RAW_OUTDIR = PROJECT_ROOT / "data/raw/amazon"
 DEFAULT_PROFILE_DIR = PROJECT_ROOT / "data/raw/amazon/browser_profile"
 
-app = FastAPI(title="Amazon Spending API", version="0.1.0")
+app = FastAPI(title="Budget Buddy API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -84,32 +84,33 @@ def _decorate_budget_fields(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]
     return data
 
 
-def _load_transaction_with_budget(conn, amazon_txn_id: str) -> dict[str, Any]:
+def _load_transaction_with_budget(conn, retailer_txn_id: str) -> dict[str, Any]:
     row = conn.execute(
         """
         SELECT
-            at.amazon_txn_id,
-            at.order_id,
+            rt.retailer_txn_id,
+            rt.retailer,
+            rt.order_id,
             o.order_date,
             o.order_url,
             o.order_total_cents,
             o.tax_cents,
-            at.txn_date,
-            at.amount_cents,
-            at.payment_last4,
-            at.raw_label,
-            at.source_url,
-            at.budget_category_id,
-            at.budget_subcategory_id,
+            rt.txn_date,
+            rt.amount_cents,
+            rt.payment_last4,
+            rt.raw_label,
+            rt.source_url,
+            rt.budget_category_id,
+            rt.budget_subcategory_id,
             bc.name AS budget_category_name,
             bsc.name AS budget_subcategory_name
-        FROM amazon_transactions at
-        LEFT JOIN orders o ON o.order_id = at.order_id
-        LEFT JOIN budget_categories bc ON bc.category_id = at.budget_category_id
-        LEFT JOIN budget_subcategories bsc ON bsc.subcategory_id = at.budget_subcategory_id
-        WHERE at.amazon_txn_id = ?
+        FROM retailer_transactions rt
+        LEFT JOIN orders o ON o.order_id = rt.order_id
+        LEFT JOIN budget_categories bc ON bc.category_id = rt.budget_category_id
+        LEFT JOIN budget_subcategories bsc ON bsc.subcategory_id = rt.budget_subcategory_id
+        WHERE rt.retailer_txn_id = ?
         """,
-        (amazon_txn_id,),
+        (retailer_txn_id,),
     ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Transaction not found")
@@ -127,7 +128,7 @@ def _latest_dates(conn) -> tuple[str | None, str | None]:
         """
         SELECT
             (SELECT MAX(order_date) FROM orders) AS last_order_date,
-            (SELECT MAX(txn_date) FROM amazon_transactions) AS last_transaction_date
+            (SELECT MAX(txn_date) FROM retailer_transactions) AS last_transaction_date
         """
     ).fetchone()
     return row["last_order_date"], row["last_transaction_date"]
@@ -257,7 +258,7 @@ def _run_sync_job() -> None:
 
         conn = connect(DEFAULT_API_DB_PATH)
         try:
-            result = collect_amazon(
+            result = REGISTRY["amazon"].collect(
                 conn=conn,
                 output_dir=DEFAULT_RAW_OUTDIR,
                 start_date=sync_start_date,
@@ -282,7 +283,7 @@ def _run_sync_job() -> None:
             )
             conn_retry = connect(DEFAULT_API_DB_PATH)
             try:
-                result = collect_amazon(
+                result = REGISTRY["amazon"].collect(
                     conn=conn_retry,
                     output_dir=DEFAULT_RAW_OUTDIR,
                     start_date=sync_start_date,
@@ -319,7 +320,7 @@ def _run_sync_job() -> None:
         finally:
             conn_after.close()
 
-        new_txns = int(getattr(result, "amazon_txns_inserted", 0) or 0)
+        new_txns = int(getattr(result, "amazon_txns_inserted", 0) or 0)  # field name kept for compat
         new_orders = int(getattr(result, "orders_inserted", 0) or 0)
         notes = _sync_completion_note(before_order_date, new_orders, new_txns)
 
@@ -519,13 +520,13 @@ def create_budget_subcategory(payload: BudgetSubcategoryCreate):
         conn.close()
 
 
-@app.patch("/transactions/{amazon_txn_id}/budget")
-def assign_transaction_budget(amazon_txn_id: str, payload: TransactionBudgetUpdate):
+@app.patch("/transactions/{retailer_txn_id}/budget")
+def assign_transaction_budget(retailer_txn_id: str, payload: TransactionBudgetUpdate):
     conn = connect(DEFAULT_API_DB_PATH)
     try:
         txn = conn.execute(
-            "SELECT amazon_txn_id FROM amazon_transactions WHERE amazon_txn_id = ?",
-            (amazon_txn_id,),
+            "SELECT retailer_txn_id FROM retailer_transactions WHERE retailer_txn_id = ?",
+            (retailer_txn_id,),
         ).fetchone()
         if not txn:
             raise HTTPException(status_code=404, detail="Transaction not found")
@@ -558,14 +559,14 @@ def assign_transaction_budget(amazon_txn_id: str, payload: TransactionBudgetUpda
 
         conn.execute(
             """
-            UPDATE amazon_transactions
+            UPDATE retailer_transactions
             SET budget_category_id = ?, budget_subcategory_id = ?, updated_at = datetime('now')
-            WHERE amazon_txn_id = ?
+            WHERE retailer_txn_id = ?
             """,
-            (category_id, subcategory_id, amazon_txn_id),
+            (category_id, subcategory_id, retailer_txn_id),
         )
         conn.commit()
-        return _load_transaction_with_budget(conn, amazon_txn_id)
+        return _load_transaction_with_budget(conn, retailer_txn_id)
     finally:
         conn.close()
 
@@ -592,10 +593,10 @@ def list_orders(
                 o.shipping_cents,
                 o.payment_last4,
                 COUNT(DISTINCT oi.item_id) AS item_count,
-                COUNT(DISTINCT at.amazon_txn_id) AS txn_count
+                COUNT(DISTINCT at.retailer_txn_id) AS txn_count
             FROM orders o
             LEFT JOIN order_items oi ON oi.order_id = o.order_id
-            LEFT JOIN amazon_transactions at ON at.order_id = o.order_id
+            LEFT JOIN retailer_transactions at ON at.order_id = o.order_id
             WHERE o.order_date >= ? AND o.order_date <= ?
               AND (
                 o.order_id LIKE ?
@@ -634,10 +635,10 @@ def get_order(order_id: str):
                 o.shipping_cents,
                 o.payment_last4,
                 COUNT(DISTINCT oi.item_id) AS item_count,
-                COUNT(DISTINCT at.amazon_txn_id) AS txn_count
+                COUNT(DISTINCT at.retailer_txn_id) AS txn_count
             FROM orders o
             LEFT JOIN order_items oi ON oi.order_id = o.order_id
-            LEFT JOIN amazon_transactions at ON at.order_id = o.order_id
+            LEFT JOIN retailer_transactions at ON at.order_id = o.order_id
             WHERE o.order_id = ?
             GROUP BY o.order_id, o.order_date, o.order_url, o.order_total_cents, o.tax_cents, o.shipping_cents, o.payment_last4
             """,
@@ -659,7 +660,7 @@ def order_transactions(order_id: str):
         rows = conn.execute(
             """
             SELECT
-                amazon_txn_id,
+                retailer_txn_id,
                 order_id,
                 txn_date,
                 amount_cents,
@@ -668,9 +669,9 @@ def order_transactions(order_id: str):
                 source_url,
                 budget_category_id,
                 budget_subcategory_id
-            FROM amazon_transactions
+            FROM retailer_transactions
             WHERE order_id = ?
-            ORDER BY COALESCE(txn_date, '0000-00-00') DESC, amazon_txn_id
+            ORDER BY COALESCE(txn_date, '0000-00-00') DESC, retailer_txn_id
             """,
             (order_id,),
         ).fetchall()
@@ -692,7 +693,7 @@ def order_items(order_id: str):
                 quantity,
                 item_subtotal_cents,
                 item_tax_cents,
-                amazon_transaction_id
+                retailer_transaction_id
             FROM order_items
             WHERE order_id = ?
             ORDER BY item_id
@@ -718,7 +719,7 @@ def list_transactions(
         rows = conn.execute(
             """
             SELECT
-                at.amazon_txn_id,
+                at.retailer_txn_id,
                 at.order_id,
                 o.order_date,
                 o.order_url,
@@ -731,18 +732,18 @@ def list_transactions(
                 at.budget_subcategory_id,
                 bc.name AS budget_category_name,
                 bsc.name AS budget_subcategory_name
-            FROM amazon_transactions at
+            FROM retailer_transactions at
             LEFT JOIN orders o ON o.order_id = at.order_id
             LEFT JOIN budget_categories bc ON bc.category_id = at.budget_category_id
             LEFT JOIN budget_subcategories bsc ON bsc.subcategory_id = at.budget_subcategory_id
             WHERE COALESCE(at.txn_date, o.order_date, '0000-00-00') >= ?
               AND COALESCE(at.txn_date, o.order_date, '9999-12-31') <= ?
               AND (
-                at.amazon_txn_id LIKE ?
+                at.retailer_txn_id LIKE ?
                 OR at.order_id LIKE ?
                 OR COALESCE(at.raw_label, '') LIKE ?
               )
-            ORDER BY COALESCE(at.txn_date, o.order_date, '0000-00-00') DESC, at.amazon_txn_id DESC
+            ORDER BY COALESCE(at.txn_date, o.order_date, '0000-00-00') DESC, at.retailer_txn_id DESC
             LIMIT ? OFFSET ?
             """,
             (start_date, end_date, like, like, like, limit, offset),
@@ -755,17 +756,17 @@ def list_transactions(
         conn.close()
 
 
-@app.get("/transactions/{amazon_txn_id}")
-def get_transaction(amazon_txn_id: str):
+@app.get("/transactions/{retailer_txn_id}")
+def get_transaction(retailer_txn_id: str):
     conn = connect(DEFAULT_API_DB_PATH)
     try:
-        return _load_transaction_with_budget(conn, amazon_txn_id)
+        return _load_transaction_with_budget(conn, retailer_txn_id)
     finally:
         conn.close()
 
 
-@app.get("/transactions/{amazon_txn_id}/items")
-def transaction_items(amazon_txn_id: str):
+@app.get("/transactions/{retailer_txn_id}/items")
+def transaction_items(retailer_txn_id: str):
     conn = connect(DEFAULT_API_DB_PATH)
     try:
         rows = conn.execute(
@@ -781,10 +782,10 @@ def transaction_items(amazon_txn_id: str):
                 oit.method
             FROM order_item_transactions oit
             JOIN order_items oi ON oi.item_id = oit.item_id
-            WHERE oit.amazon_txn_id = ?
+            WHERE oit.retailer_txn_id = ?
             ORDER BY oi.item_id
             """,
-            (amazon_txn_id,),
+            (retailer_txn_id,),
         ).fetchall()
         return {"rows": _rows_to_dict(rows)}
     finally:
@@ -813,7 +814,7 @@ def list_items(
                 oi.quantity,
                 oi.item_subtotal_cents,
                 oi.item_tax_cents,
-                oi.amazon_transaction_id
+                oi.retailer_transaction_id
             FROM order_items oi
             LEFT JOIN orders o ON o.order_id = oi.order_id
             WHERE COALESCE(o.order_date, '0000-00-00') >= ?
@@ -853,7 +854,7 @@ def get_item(item_id: str):
                 oi.quantity,
                 oi.item_subtotal_cents,
                 oi.item_tax_cents,
-                oi.amazon_transaction_id
+                oi.retailer_transaction_id
             FROM order_items oi
             LEFT JOIN orders o ON o.order_id = oi.order_id
             WHERE oi.item_id = ?
@@ -876,7 +877,7 @@ def item_transactions(item_id: str):
         rows = conn.execute(
             """
             SELECT
-                at.amazon_txn_id,
+                at.retailer_txn_id,
                 at.order_id,
                 at.txn_date,
                 at.amount_cents,
@@ -886,9 +887,9 @@ def item_transactions(item_id: str):
                 oit.allocated_amount_cents,
                 oit.method
             FROM order_item_transactions oit
-            JOIN amazon_transactions at ON at.amazon_txn_id = oit.amazon_txn_id
+            JOIN retailer_transactions at ON at.retailer_txn_id = oit.retailer_txn_id
             WHERE oit.item_id = ?
-            ORDER BY COALESCE(at.txn_date, '0000-00-00') DESC, at.amazon_txn_id
+            ORDER BY COALESCE(at.txn_date, '0000-00-00') DESC, at.retailer_txn_id
             """,
             (item_id,),
         ).fetchall()
