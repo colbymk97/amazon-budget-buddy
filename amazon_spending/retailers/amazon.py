@@ -12,6 +12,7 @@ from typing import Callable
 
 from .base import (
     CollectResult,
+    LoginResult,
     ParsedOrder,
     ParsedItem,
     ParsedRetailerTransaction,
@@ -876,6 +877,30 @@ def _orders_page_ready(page) -> bool:
     return _wait_for_orders_page_ready(page, timeout_ms=12000)
 
 
+def _is_logged_in_homepage(page) -> bool:
+    """Return True if the Amazon homepage is showing a logged-in session."""
+    url = page.url.lower()
+    if any(token in url for token in ("ap/signin", "ap/cvf", "validatecaptcha", "challenge")):
+        return False
+    try:
+        greeting = page.locator("#nav-link-accountList-nav-line-1").text_content(timeout=3000) or ""
+        return "sign in" not in greeting.lower()
+    except Exception:
+        content = page.content().lower()
+        return "hello, sign in" not in content and "hello," in content
+
+
+def _wait_for_login(page, timeout_s: int = 300) -> bool:
+    """Poll until the user logs in or timeout_s elapses. Returns True if logged in."""
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _is_logged_in_homepage(page):
+            return True
+        page.wait_for_timeout(2000)
+    return False
+
+
 def _launch_and_open_orders(p, profile_dir: Path, headless: bool):
     context = p.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
@@ -1293,10 +1318,77 @@ def collect_amazon(
     )
 
 
+_DEFAULT_AMAZON_PROFILE = Path("data/raw/amazon/browser_profile")
+_AMAZON_HOME = "https://www.amazon.com"
+
+
 class AmazonCollector(RetailerCollector):
     """Retailer adapter for Amazon order history."""
 
     RETAILER_ID = "amazon"
+
+    def login(
+        self,
+        user_data_dir: Path | None = None,
+        *,
+        check_only: bool = False,
+        timeout_s: int = 300,
+    ) -> LoginResult:
+        """Open a headed browser so the user can log in to Amazon.
+
+        If check_only=True, runs headless and immediately returns whether the
+        stored session is still valid — useful for scripting.
+
+        The browser reuses the same persistent Chromium profile as `collect`,
+        so a successful login here means `collect` will also work without
+        prompting.
+        """
+        from playwright.sync_api import sync_playwright
+
+        profile_dir = user_data_dir or _DEFAULT_AMAZON_PROFILE
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        headless = check_only
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                viewport={"width": 1400, "height": 1000},
+            )
+            try:
+                page = context.new_page()
+                page.goto(_AMAZON_HOME, wait_until="domcontentloaded")
+
+                if _is_logged_in_homepage(page):
+                    return LoginResult(
+                        status="logged_in",
+                        message="Already logged in to Amazon.",
+                        already_logged_in=True,
+                    )
+
+                if check_only:
+                    return LoginResult(
+                        status="login_required",
+                        message="Not logged in. Run 'amazon-spending login --retailer amazon' to authenticate.",
+                    )
+
+                print(
+                    "Amazon login required.\n"
+                    "Complete sign-in (including any MFA) in the browser window.\n"
+                    "This window will close automatically once you are signed in.\n"
+                    f"(Waiting up to {timeout_s}s…)"
+                )
+
+                logged_in = _wait_for_login(page, timeout_s=timeout_s)
+            finally:
+                context.close()
+
+        if logged_in:
+            return LoginResult(status="logged_in", message="Login successful. Session saved.")
+        return LoginResult(
+            status="timeout",
+            message=f"Timed out after {timeout_s}s without detecting a successful login.",
+        )
 
     def collect(
         self,

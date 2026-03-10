@@ -112,6 +112,25 @@ note:
   The new React UI can be launched separately via the API server — see README.
 """
 
+_LOGIN_EPILOG = """
+examples:
+  # Open a browser window and log in to Amazon interactively
+  amazon-spending login --retailer amazon
+
+  # Check silently whether the stored session is still valid (exit 0 = ok)
+  amazon-spending login --retailer amazon --check
+
+  # Use a custom browser profile location
+  amazon-spending login --retailer amazon --user-data-dir /path/to/profile
+
+notes:
+  - Amazon requires MFA, so login is always interactive (no password flags).
+  - The browser reuses the same persistent Chromium profile as 'collect', so
+    logging in here means future collect runs will not need to prompt.
+  - --check is silent and suitable for scripting: exit 0 = logged in,
+    exit 1 = login required.
+"""
+
 _ACTUAL_SYNC_EPILOG = """
 prerequisites:
   pip install actualpy                         # or: pip install "amazon-spending[actual]"
@@ -329,6 +348,59 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_COLLECT_EPILOG,
     )
     _add_collect_args(p_collect_amazon)
+
+    # ------------------------------------------------------------------- login
+    p_login = sub.add_parser(
+        "login",
+        help="Authenticate with a retailer by logging in via a browser window",
+        description=(
+            "Opens a Chromium browser window so you can log in to the retailer\n"
+            "interactively (including MFA). The session is saved in a persistent\n"
+            "browser profile so future 'collect' runs work without prompting.\n"
+            "\n"
+            "Use --check to test silently whether the stored session is still valid."
+        ),
+        formatter_class=_Formatter,
+        epilog=_LOGIN_EPILOG,
+    )
+    p_login.add_argument(
+        "--retailer",
+        required=True,
+        choices=_RETAILER_CHOICES,
+        metavar="NAME",
+        help=f"Retailer to authenticate with: {{{', '.join(_RETAILER_CHOICES)}}}",
+    )
+    p_login.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Check silently whether the stored session is valid (headless). "
+            "Exits 0 if logged in, 1 if login is required."
+        ),
+    )
+    p_login.add_argument(
+        "--user-data-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Persistent browser profile directory "
+            "(default: data/raw/<retailer>/browser_profile)"
+        ),
+    )
+    p_login.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Seconds to wait for manual login before giving up (default: 300)",
+    )
+    p_login.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print result as a JSON object instead of plain text",
+    )
 
     # ------------------------------------------------------ import-transactions
     p_import = sub.add_parser(
@@ -557,6 +629,34 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         print(f"  item-txn links written: {result.item_txn_links_written}")
 
 
+def _handle_login(args: argparse.Namespace) -> None:
+    collector = REGISTRY[args.retailer]
+    user_data_dir = args.user_data_dir or Path(f"data/raw/{args.retailer}/browser_profile")
+
+    try:
+        result = collector.login(
+            user_data_dir=user_data_dir,
+            check_only=args.check,
+            timeout_s=args.timeout,
+        )
+    except NotImplementedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_json:
+        print(json.dumps({
+            "retailer": args.retailer,
+            "status": result.status,
+            "message": result.message,
+            "already_logged_in": result.already_logged_in,
+        }))
+    else:
+        print(result.message)
+
+    if result.status not in ("logged_in",):
+        sys.exit(1)
+
+
 def _handle_import(args: argparse.Namespace, conn) -> None:
     count = import_transactions_csv(conn, args.csv, args.account_id)
 
@@ -653,6 +753,11 @@ def _handle_view(args: argparse.Namespace, conn) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    # login does not need a database connection
+    if args.command == "login":
+        _handle_login(args)
+        return
 
     conn = connect(args.db)
     try:
