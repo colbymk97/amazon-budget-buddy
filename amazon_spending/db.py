@@ -132,14 +132,22 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             UNIQUE(category_id, name)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_category_id
-            ON retailer_transactions(budget_category_id);
-        CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_subcategory_id
-            ON retailer_transactions(budget_subcategory_id);
         CREATE INDEX IF NOT EXISTS idx_budget_subcategories_category_id
             ON budget_subcategories(category_id);
         """
     )
+
+    # Only create indexes on retailer_transactions if the table already exists;
+    # on a fresh database schema.sql will create them after the tables are made.
+    if _cols("retailer_transactions"):
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_category_id
+                ON retailer_transactions(budget_category_id);
+            CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_subcategory_id
+                ON retailer_transactions(budget_subcategory_id);
+            """
+        )
 
 
 def init_db(conn: sqlite3.Connection) -> None:

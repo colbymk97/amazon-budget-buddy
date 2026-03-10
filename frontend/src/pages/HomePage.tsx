@@ -26,8 +26,9 @@ export function HomePage() {
         if (!active) return;
         setError("Failed to fetch sync status.");
       } finally {
-        if (!active) return;
-        timer = window.setTimeout(poll, 1200);
+        if (active) {
+          timer = window.setTimeout(poll, 1200);
+        }
       }
     };
     poll();

@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import unescape
-from hashlib import sha1
+from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
@@ -224,7 +224,7 @@ def _parse_related_transactions(
         for idx, (label, amount_text) in enumerate(rows, start=1):
             amount_cents = _to_signed_cents(amount_text)
             canonical = f"{order_id}|{parsed_date}|{label.strip()}|{amount_text.strip()}|{idx}"
-            txn_hash = sha1(canonical.encode("utf-8")).hexdigest()[:16]
+            txn_hash = sha256(canonical.encode("utf-8")).hexdigest()[:16]
             txn_id = f"{order_id}-TX-{txn_hash}"
             if txn_id in seen_ids:
                 continue
@@ -804,7 +804,7 @@ def _parse_order_details(
     elif known_sum > 0 and known_sum != target_item_total_cents:
         # Apply proportional normalization when order-level discounts/credits shift paid subtotal.
         weights = [max(1, p or 0) for p in resolved_prices]
-        resolved_prices = _alloc_proportional(target_item_total_cents, weights)
+        resolved_prices = _alloc_proportional(target_item_total_cents, weights)  # type: ignore[assignment]
 
     for i, (title, qty, _) in enumerate(title_price_qty, start=1):
         subtotal = resolved_prices[i - 1] or 0
@@ -1205,7 +1205,7 @@ def collect_amazon(
                             else f"https://www.amazon.com/cpe/yourpayments/transactions?transactionTag={order_id}"
                         )
                         tx_page = context.new_page()
-                        parsed_txns: list[ParsedRetailerTransaction] = []
+                        parsed_txns = []
                         try:
                             tx_page.goto(tx_url, wait_until="domcontentloaded", timeout=30000)
                             tx_html = tx_page.content()
