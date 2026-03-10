@@ -42,7 +42,10 @@ export function DataTable<T>({
   return (
     <section className="panel">
       <div className="panel-header">
-        <h2>{title}</h2>
+        <div>
+          <h2>{title}</h2>
+          <p className="panel-subtitle">{data.length} records loaded</p>
+        </div>
         <input
           className="search"
           placeholder="Filter table..."

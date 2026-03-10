@@ -47,6 +47,9 @@ class CollectResult:
     amazon_txns_unchanged: int = 0
     amazon_txns_deleted: int = 0
     item_txn_links_written: int = 0
+    listing_pages_scanned: int = 0
+    discovered_orders: int = 0
+    known_orders_matched: int = 0
 
 
 @dataclass
@@ -887,23 +890,35 @@ def _needs_auth(page) -> bool:
     return any(marker in content for marker in markers)
 
 
-def _orders_page_ready(page) -> bool:
-    url = page.url.lower()
-    if "order-history" not in url and "your-orders" not in url:
-        return False
-    if _needs_auth(page):
-        return False
-    if _extract_order_ids_from_listing(page):
-        return True
-
+def _orders_page_markers_present(page) -> bool:
     content = page.content().lower()
-    # Covers empty periods or filtered pages that may not include order IDs.
     fallback_markers = (
         "your orders",
         "search all orders",
         "order-card",
     )
     return any(marker in content for marker in fallback_markers)
+
+
+def _wait_for_orders_page_ready(page, timeout_ms: int = 12000) -> bool:
+    url = page.url.lower()
+    if "order-history" not in url and "your-orders" not in url:
+        return False
+
+    # Headless mode often reaches domcontentloaded before the order cards render.
+    for _ in range(max(1, timeout_ms // 1000)):
+        if _needs_auth(page):
+            return False
+        if _extract_order_ids_from_listing(page):
+            return True
+        if _orders_page_markers_present(page):
+            return True
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _orders_page_ready(page) -> bool:
+    return _wait_for_orders_page_ready(page, timeout_ms=12000)
 
 
 def _launch_and_open_orders(p, profile_dir: Path, headless: bool):
@@ -946,9 +961,18 @@ def _build_collect_result(
     parsed_txns_by_order: dict[str, list[ParsedAmazonTransaction]],
     items_by_order: dict[str, list[ParsedItem]],
     notes: str,
+    listing_pages_scanned: int = 0,
+    discovered_orders: int = 0,
+    known_orders_matched: int = 0,
 ) -> CollectResult:
     if not all_orders:
-        return CollectResult(status="no_data", notes=notes)
+        return CollectResult(
+            status="no_data",
+            notes=notes,
+            listing_pages_scanned=listing_pages_scanned,
+            discovered_orders=discovered_orders,
+            known_orders_matched=known_orders_matched,
+        )
 
     order_stats = _reconcile_orders_and_shipments(conn, all_orders)
     item_stats = _reconcile_items(conn, all_items)
@@ -976,6 +1000,9 @@ def _build_collect_result(
         amazon_txns_unchanged=txn_stats["amazon_txns_unchanged"],
         amazon_txns_deleted=txn_stats["amazon_txns_deleted"],
         item_txn_links_written=link_count,
+        listing_pages_scanned=listing_pages_scanned,
+        discovered_orders=discovered_orders,
+        known_orders_matched=known_orders_matched,
     )
 
 
@@ -993,6 +1020,8 @@ def collect_amazon(
     allow_interactive_auth: bool = True,
     should_abort: Callable[[], bool] | None = None,
     stop_when_before_start_date: bool = False,
+    known_order_ids: list[str] | None = None,
+    overlap_match_threshold: int = 1,
 ) -> CollectResult:
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1000,6 +1029,10 @@ def collect_amazon(
     all_items: list[ParsedItem] = []
     parsed_txns_by_order: dict[str, list[ParsedAmazonTransaction]] = {}
     items_by_order: dict[str, list[ParsedItem]] = {}
+    listing_pages_scanned = 0
+    discovered_order_count = 0
+    known_order_id_set = set(known_order_ids or [])
+    matched_known_order_ids: set[str] = set()
     if test_run:
         run_dir = _resolve_saved_run_dir(output_dir, saved_run_dir)
         if run_dir is None:
@@ -1066,7 +1099,17 @@ def collect_amazon(
         notes = f"Test-run parsed saved raw pages from {run_dir}"
         if start_date or end_date:
             notes += f" | filters requested start_date={start_date}, end_date={end_date}"
-        return _build_collect_result(conn, all_orders, all_items, parsed_txns_by_order, items_by_order, notes)
+        return _build_collect_result(
+            conn,
+            all_orders,
+            all_items,
+            parsed_txns_by_order,
+            items_by_order,
+            notes,
+            listing_pages_scanned=listing_pages_scanned,
+            discovered_orders=len(all_orders),
+            known_orders_matched=0,
+        )
 
     try:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -1133,18 +1176,37 @@ def collect_amazon(
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
             except PlaywrightTimeoutError:
                 pass
+            try:
+                page.wait_for_load_state("networkidle", timeout=3000)
+            except PlaywrightTimeoutError:
+                pass
+            _wait_for_orders_page_ready(page, timeout_ms=8000)
 
             html = page.content()
             (run_dir / f"orders_page_{page_num}.html").write_text(html, encoding="utf-8")
+            listing_pages_scanned = page_num
 
             current_ids = _extract_order_ids_from_listing(page)
             for oid in current_ids:
                 if oid not in seen_orders:
                     seen_orders.add(oid)
                     order_ids.append(oid)
-            print(f"[orders] page={page_num} discovered_total={len(order_ids)}")
+                if oid in known_order_id_set:
+                    matched_known_order_ids.add(oid)
+            discovered_order_count = len(order_ids)
+            print(
+                f"[orders] page={page_num} discovered_total={discovered_order_count} "
+                f"matched_known={len(matched_known_order_ids)}"
+            )
 
             if order_limit and len(order_ids) >= order_limit:
+                break
+            if (
+                not order_limit
+                and known_order_id_set
+                and len(matched_known_order_ids) >= max(1, overlap_match_threshold)
+            ):
+                print("[orders] stopping after matching recent imported orders on listing pages")
                 break
             if effective_max_pages is not None and page_num >= effective_max_pages:
                 break
@@ -1253,6 +1315,22 @@ def collect_amazon(
     notes = f"Saved raw pages to {run_dir}"
     if start_date or end_date:
         notes += f" | filters requested start_date={start_date}, end_date={end_date}"
+    if known_order_id_set:
+        notes += (
+            f" | scanned_pages={listing_pages_scanned}"
+            f" discovered_orders={discovered_order_count}"
+            f" matched_known_orders={len(matched_known_order_ids)}"
+        )
     if not all_orders:
         notes = f"No orders parsed. Raw pages saved under {run_dir}"
-    return _build_collect_result(conn, all_orders, all_items, parsed_txns_by_order, items_by_order, notes)
+    return _build_collect_result(
+        conn,
+        all_orders,
+        all_items,
+        parsed_txns_by_order,
+        items_by_order,
+        notes,
+        listing_pages_scanned=listing_pages_scanned,
+        discovered_orders=discovered_order_count,
+        known_orders_matched=len(matched_known_order_ids),
+    )

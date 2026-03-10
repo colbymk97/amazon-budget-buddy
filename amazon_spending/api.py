@@ -41,6 +41,8 @@ _SYNC_STATE: dict[str, Any] = {
     "last_order_date": None,
     "last_transaction_date": None,
     "new_transactions_added": 0,
+    "new_orders_added": 0,
+    "sync_since_date": None,
     "status": "idle",
     "notes": "",
     "error": None,
@@ -131,6 +133,20 @@ def _latest_dates(conn) -> tuple[str | None, str | None]:
     return row["last_order_date"], row["last_transaction_date"]
 
 
+def _recent_order_ids(conn, limit: int = 30) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT order_id
+        FROM orders
+        WHERE order_date IS NOT NULL
+        ORDER BY order_date DESC, order_id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [row["order_id"] for row in rows]
+
+
 def _incremental_start_date(last_order_date: str | None, overlap_days: int = 2) -> str | None:
     if not last_order_date:
         return None
@@ -162,6 +178,26 @@ def _incremental_max_pages(
     return max(min_pages, min(max_pages, pages))
 
 
+def _should_retry_headed(result) -> bool:
+    if getattr(result, "status", None) == "auth_required":
+        return True
+    return (
+        getattr(result, "status", None) == "no_data"
+        and int(getattr(result, "orders_collected", 0) or 0) == 0
+        and int(getattr(result, "discovered_orders", 0) or 0) == 0
+    )
+
+
+def _sync_completion_note(since_date: str | None, new_orders: int, new_txns: int) -> str:
+    since_label = since_date or "your last import"
+    if new_orders <= 0 and new_txns <= 0:
+        return f"No new orders found since {since_label}."
+    return (
+        f"Import complete. Found {new_orders} order(s) since {since_label} "
+        f"and added {new_txns} new transaction(s)."
+    )
+
+
 def _sync_snapshot() -> dict[str, Any]:
     with _SYNC_LOCK:
         return dict(_SYNC_STATE)
@@ -189,11 +225,14 @@ def _run_sync_job() -> None:
         notes="Starting background import...",
         error=None,
         new_transactions_added=0,
+        new_orders_added=0,
+        sync_since_date=None,
     )
     try:
         conn_before = connect(DEFAULT_API_DB_PATH)
         try:
             before_order_date, before_txn_date = _latest_dates(conn_before)
+            recent_known_order_ids = _recent_order_ids(conn_before, limit=30)
         finally:
             conn_before.close()
         _set_sync_state(
@@ -201,14 +240,18 @@ def _run_sync_job() -> None:
             stage="collecting",
             last_order_date=before_order_date,
             last_transaction_date=before_txn_date,
+            sync_since_date=before_order_date,
             notes="Collecting latest orders and transactions...",
         )
         sync_start_date = _incremental_start_date(before_order_date, overlap_days=2)
         sync_max_pages = _incremental_max_pages(before_order_date, overlap_days=2)
+        if recent_known_order_ids:
+            sync_max_pages = max(sync_max_pages, 40)
         _set_sync_state(
             notes=(
                 "Collecting latest orders and transactions "
-                f"(start_date={sync_start_date or 'none'}, max_pages={sync_max_pages})..."
+                f"(since={before_order_date or 'full import'}, "
+                f"start_date={sync_start_date or 'none'}, max_pages_cap={sync_max_pages})..."
             )
         )
 
@@ -224,17 +267,18 @@ def _run_sync_job() -> None:
                 allow_interactive_auth=False,
                 should_abort=_cancel_requested,
                 stop_when_before_start_date=True,
+                known_order_ids=recent_known_order_ids,
             )
         finally:
             conn.close()
 
         # Some sessions are valid but Amazon still challenges headless mode.
         # Retry once headed (non-interactive) using the same persistent profile.
-        if result.status == "auth_required":
+        if _should_retry_headed(result):
             _set_sync_state(
                 progress=35,
                 stage="retry_headed",
-                notes="Headless auth challenge detected. Retrying headed mode with existing session...",
+                notes="Headless scrape returned no usable data. Retrying in a visible browser window...",
             )
             conn_retry = connect(DEFAULT_API_DB_PATH)
             try:
@@ -248,6 +292,7 @@ def _run_sync_job() -> None:
                     allow_interactive_auth=False,
                     should_abort=_cancel_requested,
                     stop_when_before_start_date=True,
+                    known_order_ids=recent_known_order_ids,
                 )
             finally:
                 conn_retry.close()
@@ -263,6 +308,7 @@ def _run_sync_job() -> None:
                 notes="Import terminated by user.",
                 error=None,
                 new_transactions_added=0,
+                new_orders_added=0,
             )
             return
 
@@ -274,10 +320,8 @@ def _run_sync_job() -> None:
             conn_after.close()
 
         new_txns = int(getattr(result, "amazon_txns_inserted", 0) or 0)
-        if new_txns == 0 and result.status == "ok":
-            notes = "No new transactions found since your last import."
-        else:
-            notes = f"Import complete. Added {new_txns} new transaction(s)."
+        new_orders = int(getattr(result, "orders_inserted", 0) or 0)
+        notes = _sync_completion_note(before_order_date, new_orders, new_txns)
 
         _set_sync_state(
             running=False,
@@ -291,6 +335,7 @@ def _run_sync_job() -> None:
             last_order_date=after_order_date,
             last_transaction_date=after_txn_date,
             new_transactions_added=new_txns,
+            new_orders_added=new_orders,
         )
     except Exception as exc:
         _set_sync_state(
@@ -302,6 +347,7 @@ def _run_sync_job() -> None:
             status="error",
             notes="Background import failed.",
             error=str(exc),
+            new_orders_added=0,
         )
 
 

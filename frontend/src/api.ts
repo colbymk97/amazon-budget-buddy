@@ -95,6 +95,8 @@ export type SyncStatus = {
   last_order_date?: string | null;
   last_transaction_date?: string | null;
   new_transactions_added?: number;
+  new_orders_added?: number;
+  sync_since_date?: string | null;
   status?: string;
   notes?: string;
   error?: string | null;
