@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { formatMoney, getItem, getItemTransactions } from "../api";
-import type { AmazonTransaction, OrderItem } from "../types";
+import type { RetailerTransaction, OrderItem } from "../types";
 
 export function ItemDetailPage() {
   const { itemId = "" } = useParams();
   const [item, setItem] = useState<OrderItem | null>(null);
-  const [txns, setTxns] = useState<AmazonTransaction[]>([]);
+  const [txns, setTxns] = useState<RetailerTransaction[]>([]);
 
   useEffect(() => {
     if (!itemId) return;
@@ -65,9 +65,9 @@ export function ItemDetailPage() {
               </thead>
               <tbody>
                 {txns.map((t) => (
-                  <tr key={t.amazon_txn_id}>
+                  <tr key={t.retailer_txn_id}>
                     <td>
-                      <Link to={`/transactions/${t.amazon_txn_id}`}>{t.amazon_txn_id}</Link>
+                      <Link to={`/transactions/${t.retailer_txn_id}`}>{t.retailer_txn_id}</Link>
                     </td>
                     <td>{t.txn_date ?? "n/a"}</td>
                     <td>{formatMoney(t.amount_cents)}</td>
@@ -105,8 +105,8 @@ export function ItemDetailPage() {
           </p>
           <p>
             <strong>Primary Txn:</strong>{" "}
-            {item.amazon_transaction_id ? (
-              <Link to={`/transactions/${item.amazon_transaction_id}`}>{item.amazon_transaction_id}</Link>
+            {item.retailer_transaction_id ? (
+              <Link to={`/transactions/${item.retailer_transaction_id}`}>{item.retailer_transaction_id}</Link>
             ) : (
               "n/a"
             )}

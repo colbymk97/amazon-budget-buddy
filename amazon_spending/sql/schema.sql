@@ -2,6 +2,7 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT PRIMARY KEY,
+    retailer TEXT NOT NULL DEFAULT 'amazon',
     order_date TEXT NOT NULL,
     order_url TEXT,
     order_total_cents INTEGER NOT NULL,
@@ -23,8 +24,9 @@ CREATE TABLE IF NOT EXISTS shipments (
     FOREIGN KEY(order_id) REFERENCES orders(order_id)
 );
 
-CREATE TABLE IF NOT EXISTS amazon_transactions (
-    amazon_txn_id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS retailer_transactions (
+    retailer_txn_id TEXT PRIMARY KEY,
+    retailer TEXT NOT NULL DEFAULT 'amazon',
     order_id TEXT NOT NULL,
     transaction_tag TEXT,
     txn_date TEXT,
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS order_items (
     item_id TEXT PRIMARY KEY,
     order_id TEXT NOT NULL,
     shipment_id TEXT,
-    amazon_transaction_id TEXT,
+    retailer_transaction_id TEXT,
     title TEXT NOT NULL,
     quantity INTEGER NOT NULL DEFAULT 1,
     item_subtotal_cents INTEGER NOT NULL,
@@ -74,18 +76,18 @@ CREATE TABLE IF NOT EXISTS order_items (
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(order_id) REFERENCES orders(order_id),
     FOREIGN KEY(shipment_id) REFERENCES shipments(shipment_id),
-    FOREIGN KEY(amazon_transaction_id) REFERENCES amazon_transactions(amazon_txn_id)
+    FOREIGN KEY(retailer_transaction_id) REFERENCES retailer_transactions(retailer_txn_id)
 );
 
 CREATE TABLE IF NOT EXISTS order_item_transactions (
     item_id TEXT NOT NULL,
-    amazon_txn_id TEXT NOT NULL,
+    retailer_txn_id TEXT NOT NULL,
     allocated_amount_cents INTEGER,
     method TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    PRIMARY KEY (item_id, amazon_txn_id),
+    PRIMARY KEY (item_id, retailer_txn_id),
     FOREIGN KEY(item_id) REFERENCES order_items(item_id),
-    FOREIGN KEY(amazon_txn_id) REFERENCES amazon_transactions(amazon_txn_id)
+    FOREIGN KEY(retailer_txn_id) REFERENCES retailer_transactions(retailer_txn_id)
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
@@ -128,15 +130,17 @@ CREATE TABLE IF NOT EXISTS manual_overrides (
     FOREIGN KEY(selected_item_id) REFERENCES order_items(item_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_orders_retailer ON orders(retailer);
 CREATE INDEX IF NOT EXISTS idx_shipments_order_id ON shipments(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_shipment_id ON order_items(shipment_id);
-CREATE INDEX IF NOT EXISTS idx_order_items_amazon_txn_id ON order_items(amazon_transaction_id);
-CREATE INDEX IF NOT EXISTS idx_amazon_transactions_order_id ON amazon_transactions(order_id);
-CREATE INDEX IF NOT EXISTS idx_amazon_transactions_budget_category_id ON amazon_transactions(budget_category_id);
-CREATE INDEX IF NOT EXISTS idx_amazon_transactions_budget_subcategory_id ON amazon_transactions(budget_subcategory_id);
+CREATE INDEX IF NOT EXISTS idx_order_items_retailer_txn_id ON order_items(retailer_transaction_id);
+CREATE INDEX IF NOT EXISTS idx_retailer_transactions_order_id ON retailer_transactions(order_id);
+CREATE INDEX IF NOT EXISTS idx_retailer_transactions_retailer ON retailer_transactions(retailer);
+CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_category_id ON retailer_transactions(budget_category_id);
+CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_subcategory_id ON retailer_transactions(budget_subcategory_id);
 CREATE INDEX IF NOT EXISTS idx_order_item_transactions_item ON order_item_transactions(item_id);
-CREATE INDEX IF NOT EXISTS idx_order_item_transactions_txn ON order_item_transactions(amazon_txn_id);
+CREATE INDEX IF NOT EXISTS idx_order_item_transactions_txn ON order_item_transactions(retailer_txn_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_posted_date ON transactions(posted_date);
 CREATE INDEX IF NOT EXISTS idx_matches_txn_id ON matches(txn_id);
 CREATE INDEX IF NOT EXISTS idx_budget_subcategories_category_id ON budget_subcategories(category_id);

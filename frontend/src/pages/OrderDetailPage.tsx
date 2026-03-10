@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { formatMoney, getOrder, getOrderItems, getOrderTransactions } from "../api";
-import type { AmazonTransaction, Order, OrderItem } from "../types";
+import type { RetailerTransaction, Order, OrderItem } from "../types";
 
 export function OrderDetailPage() {
   const { orderId = "" } = useParams();
   const [order, setOrder] = useState<Order | null>(null);
-  const [txns, setTxns] = useState<AmazonTransaction[]>([]);
+  const [txns, setTxns] = useState<RetailerTransaction[]>([]);
   const [items, setItems] = useState<OrderItem[]>([]);
 
   useEffect(() => {
@@ -30,6 +30,9 @@ export function OrderDetailPage() {
             <strong>Order ID:</strong> {order.order_id}
           </p>
           <p>
+            <strong>Retailer:</strong> {order.retailer ?? "amazon"}
+          </p>
+          <p>
             <strong>Date:</strong> {order.order_date}
           </p>
           <p>
@@ -42,7 +45,7 @@ export function OrderDetailPage() {
             <strong>Shipping:</strong> {formatMoney(order.shipping_cents)}
           </p>
           <p>
-            <strong>Amazon URL:</strong>{" "}
+            <strong>Order URL:</strong>{" "}
             <a href={order.order_url ?? "#"} target="_blank" rel="noreferrer">
               {order.order_url ?? "n/a"}
             </a>
@@ -62,9 +65,9 @@ export function OrderDetailPage() {
               </thead>
               <tbody>
                 {txns.map((t) => (
-                  <tr key={t.amazon_txn_id}>
+                  <tr key={t.retailer_txn_id}>
                     <td>
-                      <Link to={`/transactions/${t.amazon_txn_id}`}>{t.amazon_txn_id}</Link>
+                      <Link to={`/transactions/${t.retailer_txn_id}`}>{t.retailer_txn_id}</Link>
                     </td>
                     <td>{t.txn_date ?? "n/a"}</td>
                     <td>{formatMoney(t.amount_cents)}</td>

@@ -1,66 +1,560 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
 
-from .collector import collect_amazon
 from .db import DEFAULT_DB_PATH, connect, init_db
+from .exporter import export_reports
 from .importers import import_transactions_csv
+from .retailers import REGISTRY
+
+VERSION = "0.1.0"
+_RETAILER_CHOICES = sorted(REGISTRY.keys())
+
+# ---------------------------------------------------------------------------
+# Shared formatter: wider help columns for long flag names
+# ---------------------------------------------------------------------------
+
+class _Formatter(argparse.RawDescriptionHelpFormatter):
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, max_help_position=36, width=90)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="amazon-spending")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH, help="SQLite database path")
+# ---------------------------------------------------------------------------
+# Per-command epilog examples
+# ---------------------------------------------------------------------------
 
-    sub = parser.add_subparsers(dest="command", required=True)
+_INIT_DB_EPILOG = """
+examples:
+  # Initialize with the default database path
+  amazon-spending init-db
 
-    sub.add_parser("init-db", help="Initialize SQLite schema")
+  # Use a custom database file
+  amazon-spending --db ~/my-data.sqlite3 init-db
+"""
 
-    p_import = sub.add_parser("import-transactions", help="Import transactions CSV")
-    p_import.add_argument("--csv", type=Path, required=True, help="Path to transactions CSV")
-    p_import.add_argument("--account-id", type=str, default=None, help="Optional account identifier")
+_COLLECT_EPILOG = """
+examples:
+  # Collect the most recent 50 Amazon orders (headless, auto-auth fallback)
+  amazon-spending collect --retailer amazon --order-limit 50
 
-    p_collect = sub.add_parser("collect-amazon", help="Collect Amazon orders into local DB")
-    p_collect.add_argument("--outdir", type=Path, default=Path("data/raw/amazon"), help="Raw output directory")
-    p_collect.add_argument("--start-date", type=str, default=None, help="YYYY-MM-DD")
-    p_collect.add_argument("--end-date", type=str, default=None, help="YYYY-MM-DD")
-    p_collect.add_argument("--order-limit", type=int, default=None, help="Max orders to collect")
-    p_collect.add_argument(
+  # Collect a specific date range
+  amazon-spending collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
+
+  # Force a visible browser window (useful for first-time login / MFA)
+  amazon-spending collect --retailer amazon --headed --order-limit 20
+
+  # Re-parse previously saved HTML without launching a browser
+  amazon-spending collect --retailer amazon --test-run
+
+  # Re-parse a specific saved snapshot directory
+  amazon-spending collect --retailer amazon --saved-run-dir data/raw/amazon/20260216_081306
+
+  # Fastest incremental sync — stop when known orders are encountered
+  amazon-spending collect --retailer amazon --stop-on-known
+
+  # Machine-readable JSON output
+  amazon-spending collect --retailer amazon --order-limit 10 --json
+
+notes:
+  - Raw HTML is saved under --outdir/<timestamp>/ before parsing.
+  - Headless mode falls back automatically when the retailer requires
+    interactive login or MFA.
+  - --saved-run-dir implies --test-run automatically.
+  - Deprecated alias: collect-amazon (same as collect --retailer amazon)
+"""
+
+_IMPORT_EPILOG = """
+required CSV columns:
+  transaction_id   Unique identifier for the bank/card transaction
+  posted_date      ISO date the transaction posted (YYYY-MM-DD)
+  amount           Transaction amount in dollars (e.g. 42.99 or -12.50)
+  merchant_raw     Raw merchant name as it appears on the statement
+
+examples:
+  # Import from a Copilot / Chase CSV export
+  amazon-spending import-transactions --csv data/transactions.csv
+
+  # Tag rows with an account label for multi-card households
+  amazon-spending import-transactions --csv data/amex.csv --account-id amex-gold
+
+  # Emit a JSON summary instead of plain text
+  amazon-spending import-transactions --csv data/transactions.csv --json
+"""
+
+_EXPORT_EPILOG = """
+output files:
+  report_transaction_itemized.csv   Each transaction mapped to its matched order items
+  report_unmatched.csv              Transactions with no order match
+  report_monthly_summary.csv        Monthly spending totals grouped by essential flag
+
+examples:
+  # Export to the default directory (data/exports/)
+  amazon-spending export
+
+  # Export to a custom directory
+  amazon-spending export --outdir ~/reports/2024
+"""
+
+_VIEW_EPILOG = """
+examples:
+  # Open the viewer on the default address (http://127.0.0.1:8501)
+  amazon-spending view
+
+  # Expose the viewer on all interfaces
+  amazon-spending view --host 0.0.0.0 --port 8888
+
+note:
+  Requires Streamlit: pip install streamlit
+  The new React UI can be launched separately via the API server — see README.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Shared collect flags — used by both `collect` and the legacy `collect-amazon`
+# ---------------------------------------------------------------------------
+
+def _add_collect_args(p: argparse.ArgumentParser) -> None:
+    """Attach all collect flags to a parser (shared between collect and collect-amazon)."""
+
+    # Date / scope
+    p.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Earliest order date to collect (inclusive)",
+    )
+    p.add_argument(
+        "--end-date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="Latest order date to collect (inclusive)",
+    )
+    p.add_argument(
+        "--order-limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum number of orders to collect per run",
+    )
+    p.add_argument(
         "--max-pages",
         type=int,
         default=None,
-        help="Max order history pages to traverse (optional; defaults from --order-limit when provided)",
+        metavar="N",
+        help=(
+            "Maximum listing pages to traverse "
+            "(default: derived from --order-limit when provided)"
+        ),
     )
-    p_collect.add_argument(
+
+    # Browser options
+    browser_group = p.add_argument_group("browser options")
+    browser_group.add_argument(
+        "--headed",
+        action="store_true",
+        help="Force a visible browser window (default: headless with auto-auth fallback)",
+    )
+    browser_group.add_argument(
+        "--user-data-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Persistent browser profile directory for session cookies "
+            "(default: data/raw/<retailer>/browser_profile)"
+        ),
+    )
+
+    # Storage / offline options
+    storage_group = p.add_argument_group("storage options")
+    storage_group.add_argument(
+        "--outdir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Directory for raw HTML snapshots (default: data/raw/<retailer>)",
+    )
+    storage_group.add_argument(
         "--test-run",
         action="store_true",
-        help="Parse previously saved raw HTML into DB without launching browser scraping",
+        help="Parse a previously saved HTML snapshot without launching the browser",
     )
-    p_collect.add_argument(
+    storage_group.add_argument(
         "--saved-run-dir",
         type=Path,
         default=None,
-        help="Optional saved raw run dir (defaults to latest under --outdir)",
+        metavar="PATH",
+        help=(
+            "Specific snapshot directory to parse (implies --test-run; "
+            "default: latest under --outdir)"
+        ),
     )
-    p_collect.add_argument(
-        "--headed",
+
+    # Incremental sync
+    sync_group = p.add_argument_group("incremental sync options")
+    sync_group.add_argument(
+        "--stop-on-known",
         action="store_true",
-        help="Force headed browser mode (default is headless with automatic auth fallback)",
+        help=(
+            "Stop scanning as soon as a previously imported order ID is encountered "
+            "(fastest for incremental syncs)"
+        ),
+    )
+
+    # Output
+    p.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Parser construction
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="amazon-spending",
+        description=(
+            "amazon-spending — local-first retailer order collector and budget tool.\n"
+            "\n"
+            "Scrapes order history from supported retailers into a local SQLite database,\n"
+            "imports bank/card transactions, and exports reconciliation reports. All data\n"
+            "stays on your machine — no cloud services required.\n"
+            "\n"
+            f"supported retailers: {', '.join(_RETAILER_CHOICES)}"
+        ),
+        formatter_class=_Formatter,
+        epilog=(
+            "Run 'amazon-spending <command> --help' for detailed help on any command.\n"
+            "\n"
+            "quick start:\n"
+            "  amazon-spending init-db\n"
+            "  amazon-spending collect --retailer amazon --order-limit 100\n"
+            "  amazon-spending view\n"
+        ),
+    )
+
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        metavar="PATH",
+        help=f"SQLite database path (default: {DEFAULT_DB_PATH})",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"amazon-spending {VERSION}",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True, title="commands")
+
+    # ------------------------------------------------------------------ init-db
+    sub.add_parser(
+        "init-db",
+        help="Initialize or migrate the SQLite schema",
+        description=(
+            "Creates the SQLite database and applies the full schema.\n"
+            "Safe to run on an existing database — missing tables and columns\n"
+            "are added without touching existing data."
+        ),
+        formatter_class=_Formatter,
+        epilog=_INIT_DB_EPILOG,
+    )
+
+    # ----------------------------------------------------------------- collect
+    p_collect = sub.add_parser(
+        "collect",
+        help="Scrape retailer order history into the local database",
+        description=(
+            "Launches a browser to collect orders, shipments, line items, and\n"
+            "payment transactions for the specified retailer, then reconciles them\n"
+            "into the local SQLite database.\n"
+            "\n"
+            f"supported retailers: {', '.join(_RETAILER_CHOICES)}"
+        ),
+        formatter_class=_Formatter,
+        epilog=_COLLECT_EPILOG,
     )
     p_collect.add_argument(
-        "--user-data-dir",
-        type=Path,
-        default=Path("data/raw/amazon/browser_profile"),
-        help="Persistent browser profile path for session cookies",
+        "--retailer",
+        required=True,
+        choices=_RETAILER_CHOICES,
+        metavar="NAME",
+        help=f"Retailer to collect from: {{{', '.join(_RETAILER_CHOICES)}}}",
     )
-    p_view = sub.add_parser("view", help="Open local web viewer")
-    p_view.add_argument("--host", type=str, default="127.0.0.1", help="Viewer host")
-    p_view.add_argument("--port", type=int, default=8501, help="Viewer port")
+    _add_collect_args(p_collect)
+
+    # -------------------------------------------- collect-amazon (legacy alias)
+    p_collect_amazon = sub.add_parser(
+        "collect-amazon",
+        help="[deprecated] Alias for: collect --retailer amazon",
+        description="Deprecated alias for 'collect --retailer amazon'. Use collect instead.",
+        formatter_class=_Formatter,
+        epilog=_COLLECT_EPILOG,
+    )
+    _add_collect_args(p_collect_amazon)
+
+    # ------------------------------------------------------ import-transactions
+    p_import = sub.add_parser(
+        "import-transactions",
+        help="Import bank/card transactions from a CSV file",
+        description=(
+            "Reads a CSV file of bank or credit-card transactions and upserts\n"
+            "them into the local database for future reconciliation with retailer\n"
+            "orders. Existing rows are updated on conflict; no duplicates are\n"
+            "created for the same transaction_id."
+        ),
+        formatter_class=_Formatter,
+        epilog=_IMPORT_EPILOG,
+    )
+    p_import.add_argument(
+        "--csv",
+        type=Path,
+        required=True,
+        metavar="PATH",
+        help="Path to the transactions CSV file (required)",
+    )
+    p_import.add_argument(
+        "--account-id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Optional label to tag rows with (e.g. 'chase-freedom', 'amex-gold')",
+    )
+    p_import.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
+    # ------------------------------------------------------------------ export
+    p_export = sub.add_parser(
+        "export",
+        help="Export reconciliation reports to CSV files",
+        description=(
+            "Generates three CSV reports from the local database:\n"
+            "\n"
+            "  • report_transaction_itemized.csv — each transaction matched\n"
+            "    to its retailer order line items\n"
+            "  • report_unmatched.csv — transactions with no order match\n"
+            "  • report_monthly_summary.csv — monthly totals by essential flag"
+        ),
+        formatter_class=_Formatter,
+        epilog=_EXPORT_EPILOG,
+    )
+    p_export.add_argument(
+        "--outdir",
+        type=Path,
+        default=Path("data/exports"),
+        metavar="PATH",
+        help="Directory to write report files into (default: data/exports)",
+    )
+    p_export.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print a JSON summary of output file paths instead of plain text",
+    )
+
+    # -------------------------------------------------------------------- view
+    p_view = sub.add_parser(
+        "view",
+        help="Open the local Streamlit web viewer",
+        description=(
+            "Launches a Streamlit web app for browsing orders, items, and\n"
+            "transactions stored in the local database.\n"
+            "\n"
+            "For the newer React UI, start the API server and frontend separately\n"
+            "(see the README for instructions)."
+        ),
+        formatter_class=_Formatter,
+        epilog=_VIEW_EPILOG,
+    )
+    p_view.add_argument(
+        "--host",
+        type=str,
+        default="127.0.0.1",
+        help="Host address for the viewer server (default: 127.0.0.1)",
+    )
+    p_view.add_argument(
+        "--port",
+        type=int,
+        default=8501,
+        help="Port for the viewer server (default: 8501)",
+    )
 
     return parser
 
+
+# ---------------------------------------------------------------------------
+# Command handlers
+# ---------------------------------------------------------------------------
+
+def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
+    collector = REGISTRY[retailer_id]
+
+    # Retailer-namespaced defaults for outdir and user-data-dir
+    outdir = args.outdir or Path(f"data/raw/{retailer_id}")
+    user_data_dir = args.user_data_dir or Path(f"data/raw/{retailer_id}/browser_profile")
+
+    # --saved-run-dir implies --test-run
+    test_run = args.test_run or (args.saved_run_dir is not None)
+
+    result = collector.collect(
+        conn=conn,
+        output_dir=outdir,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        order_limit=args.order_limit,
+        max_pages=args.max_pages,
+        headless=not args.headed,
+        user_data_dir=user_data_dir,
+        test_run=test_run,
+        saved_run_dir=args.saved_run_dir,
+        stop_when_before_start_date=args.stop_on_known,
+    )
+
+    if args.output_json:
+        data = {
+            "retailer": retailer_id,
+            "status": result.status,
+            "notes": result.notes,
+            "orders_collected": result.orders_collected,
+            "items_collected": result.items_collected,
+            "listing_pages_scanned": result.listing_pages_scanned,
+            "discovered_orders": result.discovered_orders,
+            "known_orders_matched": result.known_orders_matched,
+            "reconciliation": {
+                "orders": {
+                    "inserted": result.orders_inserted,
+                    "updated": result.orders_updated,
+                    "unchanged": result.orders_unchanged,
+                },
+                "shipments": {
+                    "inserted": result.shipments_inserted,
+                    "updated": result.shipments_updated,
+                    "unchanged": result.shipments_unchanged,
+                },
+                "items": {
+                    "inserted": result.items_inserted,
+                    "updated": result.items_updated,
+                    "unchanged": result.items_unchanged,
+                    "deleted": result.items_deleted,
+                },
+                "retailer_transactions": {
+                    "inserted": result.amazon_txns_inserted,
+                    "updated": result.amazon_txns_updated,
+                    "unchanged": result.amazon_txns_unchanged,
+                    "deleted": result.amazon_txns_deleted,
+                },
+                "item_transaction_links_written": result.item_txn_links_written,
+            },
+        }
+        print(json.dumps(data, indent=2))
+        return
+
+    print(f"retailer:   {retailer_id}")
+    print(f"status:     {result.status}")
+    print(result.notes)
+    if result.orders_collected or result.items_collected:
+        print(f"\ncollected:  {result.orders_collected} orders, {result.items_collected} items")
+        print(f"pages:      {result.listing_pages_scanned} listing pages scanned")
+        print(f"discovered: {result.discovered_orders} new, {result.known_orders_matched} already known")
+        print("\nreconciliation:")
+        print(
+            f"  orders       inserted={result.orders_inserted}"
+            f"  updated={result.orders_updated}"
+            f"  unchanged={result.orders_unchanged}"
+        )
+        print(
+            f"  shipments    inserted={result.shipments_inserted}"
+            f"  updated={result.shipments_updated}"
+            f"  unchanged={result.shipments_unchanged}"
+        )
+        print(
+            f"  items        inserted={result.items_inserted}"
+            f"  updated={result.items_updated}"
+            f"  unchanged={result.items_unchanged}"
+            f"  deleted={result.items_deleted}"
+        )
+        print(
+            f"  txns         inserted={result.amazon_txns_inserted}"
+            f"  updated={result.amazon_txns_updated}"
+            f"  unchanged={result.amazon_txns_unchanged}"
+            f"  deleted={result.amazon_txns_deleted}"
+        )
+        print(f"  item-txn links written: {result.item_txn_links_written}")
+
+
+def _handle_import(args: argparse.Namespace, conn) -> None:
+    count = import_transactions_csv(conn, args.csv, args.account_id)
+
+    if args.output_json:
+        print(json.dumps({"imported": count, "source": str(args.csv), "account_id": args.account_id}))
+        return
+
+    label = f" (account: {args.account_id})" if args.account_id else ""
+    print(f"Imported {count} transaction(s) from {args.csv}{label}")
+
+
+def _handle_export(args: argparse.Namespace, conn) -> None:
+    outputs = export_reports(conn, args.outdir)
+
+    if args.output_json:
+        print(json.dumps({k: str(v) for k, v in outputs.items()}, indent=2))
+        return
+
+    print(f"Reports written to {args.outdir}/")
+    for name, path in outputs.items():
+        size = path.stat().st_size if path.exists() else 0
+        print(f"  {path.name}  ({size} bytes)")
+
+
+def _handle_view(args: argparse.Namespace, conn) -> None:
+    try:
+        import streamlit  # noqa: F401
+    except ImportError:
+        print("Streamlit is not installed. Run: pip install streamlit", file=sys.stderr)
+        sys.exit(1)
+
+    app_path = Path(__file__).parent / "webapp.py"
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        str(app_path),
+        "--server.address",
+        args.host,
+        "--server.port",
+        str(args.port),
+        "--",
+        "--db",
+        str(conn.execute("PRAGMA database_list").fetchone()[2]),
+    ]
+    print(f"Starting viewer at http://{args.host}:{args.port}")
+    print("Press Ctrl+C to stop.")
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"Viewer exited with code {exc.returncode}.", file=sys.stderr)
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = build_parser()
@@ -71,85 +565,20 @@ def main() -> None:
         init_db(conn)
 
         if args.command == "init-db":
-            print(f"Initialized database at {args.db}")
-        elif args.command == "import-transactions":
-            count = import_transactions_csv(conn, args.csv, args.account_id)
-            print(f"Imported {count} transactions from {args.csv}")
+            print(f"Database initialized at {args.db}")
+        elif args.command == "collect":
+            _handle_collect(args, conn, args.retailer)
         elif args.command == "collect-amazon":
-            result = collect_amazon(
-                conn=conn,
-                output_dir=args.outdir,
-                start_date=args.start_date,
-                end_date=args.end_date,
-                order_limit=args.order_limit,
-                max_pages=args.max_pages,
-                headless=not args.headed,
-                user_data_dir=args.user_data_dir,
-                test_run=args.test_run,
-                saved_run_dir=args.saved_run_dir,
-            )
-            print(f"status={result.status}")
-            print(result.notes)
-            if result.orders_collected or result.items_collected:
-                print(f"orders_collected={result.orders_collected}")
-                print(f"items_collected={result.items_collected}")
-                print(
-                    "orders_reconciled="
-                    f"inserted:{result.orders_inserted},"
-                    f"updated:{result.orders_updated},"
-                    f"unchanged:{result.orders_unchanged}"
-                )
-                print(
-                    "shipments_reconciled="
-                    f"inserted:{result.shipments_inserted},"
-                    f"updated:{result.shipments_updated},"
-                    f"unchanged:{result.shipments_unchanged}"
-                )
-                print(
-                    "items_reconciled="
-                    f"inserted:{result.items_inserted},"
-                    f"updated:{result.items_updated},"
-                    f"unchanged:{result.items_unchanged},"
-                    f"deleted:{result.items_deleted}"
-                )
-                print(
-                    "amazon_transactions_reconciled="
-                    f"inserted:{result.amazon_txns_inserted},"
-                    f"updated:{result.amazon_txns_updated},"
-                    f"unchanged:{result.amazon_txns_unchanged},"
-                    f"deleted:{result.amazon_txns_deleted}"
-                )
-                print(f"item_transaction_links_written={result.item_txn_links_written}")
+            # Legacy alias — behaves exactly like collect --retailer amazon
+            _handle_collect(args, conn, "amazon")
+        elif args.command == "import-transactions":
+            _handle_import(args, conn)
+        elif args.command == "export":
+            _handle_export(args, conn)
         elif args.command == "view":
-            try:
-                import streamlit  # noqa: F401
-            except ImportError:
-                print("Streamlit is not installed in this environment.")
-                print("Run: pip install streamlit")
-                return
-            app_path = Path(__file__).parent / "webapp.py"
-            cmd = [
-                sys.executable,
-                "-m",
-                "streamlit",
-                "run",
-                str(app_path),
-                "--server.address",
-                args.host,
-                "--server.port",
-                str(args.port),
-                "--",
-                "--db",
-                str(args.db),
-            ]
-            print(f"Starting viewer at http://{args.host}:{args.port}")
-            try:
-                subprocess.run(cmd, check=True)
-            except subprocess.CalledProcessError as exc:
-                print(f"Viewer failed to start (exit={exc.returncode}).")
-                raise
+            _handle_view(args, conn)
         else:
-            parser.error("Unknown command")
+            parser.error(f"Unknown command: {args.command}")
     finally:
         conn.close()
 

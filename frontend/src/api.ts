@@ -1,4 +1,4 @@
-import type { AmazonTransaction, BudgetCategory, BudgetSubcategory, Order, OrderItem } from "./types";
+import type { RetailerTransaction, BudgetCategory, BudgetSubcategory, Order, OrderItem } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -38,7 +38,7 @@ export function getOrder(orderId: string) {
 }
 
 export function getOrderTransactions(orderId: string) {
-  return getJson<RowsResponse<AmazonTransaction>>(`/orders/${orderId}/transactions`);
+  return getJson<RowsResponse<RetailerTransaction>>(`/orders/${orderId}/transactions`);
 }
 
 export function getOrderItems(orderId: string) {
@@ -52,11 +52,11 @@ export function listTransactions(params: {
   limit?: number;
 }) {
   const q = toQuery(params);
-  return getJson<RowsResponse<AmazonTransaction>>(`/transactions?${q}`);
+  return getJson<RowsResponse<RetailerTransaction>>(`/transactions?${q}`);
 }
 
 export function getTransaction(txnId: string) {
-  return getJson<AmazonTransaction>(`/transactions/${txnId}`);
+  return getJson<RetailerTransaction>(`/transactions/${txnId}`);
 }
 
 export function getTransactionItems(txnId: string) {
@@ -78,7 +78,7 @@ export function getItem(itemId: string) {
 }
 
 export function getItemTransactions(itemId: string) {
-  return getJson<RowsResponse<AmazonTransaction>>(`/items/${itemId}/transactions`);
+  return getJson<RowsResponse<RetailerTransaction>>(`/items/${itemId}/transactions`);
 }
 
 export function getHealth() {

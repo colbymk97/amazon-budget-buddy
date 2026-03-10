@@ -59,9 +59,9 @@ def _quality_stats(conn: sqlite3.Connection) -> sqlite3.Row:
         SELECT
             (SELECT COUNT(*) FROM orders) AS orders_count,
             (SELECT COUNT(*) FROM orders WHERE order_total_cents = 0) AS orders_zero_total,
-            (SELECT COUNT(*) FROM amazon_transactions) AS txns_count,
-            (SELECT COUNT(*) FROM amazon_transactions WHERE amount_cents = 0) AS txns_zero_amount,
-            (SELECT COUNT(*) FROM amazon_transactions WHERE raw_label LIKE 'fallback_%') AS txns_fallback,
+            (SELECT COUNT(*) FROM retailer_transactions) AS txns_count,
+            (SELECT COUNT(*) FROM retailer_transactions WHERE amount_cents = 0) AS txns_zero_amount,
+            (SELECT COUNT(*) FROM retailer_transactions WHERE raw_label LIKE 'fallback_%') AS txns_fallback,
             (SELECT COUNT(*) FROM order_items) AS items_count
         """
     ).fetchone()
@@ -83,10 +83,10 @@ def _load_orders(conn: sqlite3.Connection, q: str, start_date: str, end_date: st
         o.shipping_cents,
         o.payment_last4,
         COUNT(DISTINCT oi.item_id) AS item_count,
-        COUNT(DISTINCT at.amazon_txn_id) AS txn_count
+        COUNT(DISTINCT at.retailer_txn_id) AS txn_count
     FROM orders o
     LEFT JOIN order_items oi ON oi.order_id = o.order_id
-    LEFT JOIN amazon_transactions at ON at.order_id = o.order_id
+    LEFT JOIN retailer_transactions at ON at.order_id = o.order_id
     WHERE o.order_date >= ? AND o.order_date <= ?
       AND (
         o.order_id LIKE ?
@@ -103,7 +103,7 @@ def _load_orders(conn: sqlite3.Connection, q: str, start_date: str, end_date: st
 def _load_transactions(conn: sqlite3.Connection, q: str, start_date: str, end_date: str, limit: int):
     sql = """
     SELECT
-        at.amazon_txn_id,
+        at.retailer_txn_id,
         at.order_id,
         o.order_date,
         o.order_url,
@@ -112,16 +112,16 @@ def _load_transactions(conn: sqlite3.Connection, q: str, start_date: str, end_da
         at.payment_last4,
         at.raw_label,
         at.source_url
-    FROM amazon_transactions at
+    FROM retailer_transactions at
     LEFT JOIN orders o ON o.order_id = at.order_id
     WHERE COALESCE(at.txn_date, o.order_date, '0000-00-00') >= ?
       AND COALESCE(at.txn_date, o.order_date, '9999-12-31') <= ?
       AND (
         at.order_id LIKE ?
-        OR at.amazon_txn_id LIKE ?
+        OR at.retailer_txn_id LIKE ?
         OR COALESCE(at.raw_label, '') LIKE ?
       )
-    ORDER BY COALESCE(at.txn_date, o.order_date, '0000-00-00') DESC, at.amazon_txn_id DESC
+    ORDER BY COALESCE(at.txn_date, o.order_date, '0000-00-00') DESC, at.retailer_txn_id DESC
     LIMIT ?
     """
     like = f"%{q.strip()}%"
@@ -139,7 +139,7 @@ def _load_order_items(conn: sqlite3.Connection, q: str, start_date: str, end_dat
         oi.quantity,
         oi.item_subtotal_cents,
         oi.item_tax_cents,
-        oi.amazon_transaction_id
+        oi.retailer_transaction_id
     FROM order_items oi
     LEFT JOIN orders o ON o.order_id = oi.order_id
     WHERE COALESCE(o.order_date, '0000-00-00') >= ?
@@ -159,10 +159,10 @@ def _load_order_items(conn: sqlite3.Connection, q: str, start_date: str, end_dat
 def _order_detail(conn: sqlite3.Connection, order_id: str):
     return conn.execute(
         """
-        SELECT o.*, COUNT(DISTINCT oi.item_id) AS item_count, COUNT(DISTINCT at.amazon_txn_id) AS txn_count
+        SELECT o.*, COUNT(DISTINCT oi.item_id) AS item_count, COUNT(DISTINCT at.retailer_txn_id) AS txn_count
         FROM orders o
         LEFT JOIN order_items oi ON oi.order_id = o.order_id
-        LEFT JOIN amazon_transactions at ON at.order_id = o.order_id
+        LEFT JOIN retailer_transactions at ON at.order_id = o.order_id
         WHERE o.order_id = ?
         GROUP BY o.order_id
         """,
@@ -173,10 +173,10 @@ def _order_detail(conn: sqlite3.Connection, order_id: str):
 def _transactions_for_order(conn: sqlite3.Connection, order_id: str):
     return conn.execute(
         """
-        SELECT amazon_txn_id, txn_date, amount_cents, payment_last4, raw_label, source_url
-        FROM amazon_transactions
+        SELECT retailer_txn_id, txn_date, amount_cents, payment_last4, raw_label, source_url
+        FROM retailer_transactions
         WHERE order_id = ?
-        ORDER BY COALESCE(txn_date, '0000-00-00') DESC, amazon_txn_id
+        ORDER BY COALESCE(txn_date, '0000-00-00') DESC, retailer_txn_id
         """,
         (order_id,),
     ).fetchall()
@@ -185,7 +185,7 @@ def _transactions_for_order(conn: sqlite3.Connection, order_id: str):
 def _items_for_order(conn: sqlite3.Connection, order_id: str):
     return conn.execute(
         """
-        SELECT item_id, title, quantity, item_subtotal_cents, item_tax_cents, amazon_transaction_id
+        SELECT item_id, title, quantity, item_subtotal_cents, item_tax_cents, retailer_transaction_id
         FROM order_items
         WHERE order_id = ?
         ORDER BY item_id
@@ -198,9 +198,9 @@ def _transaction_detail(conn: sqlite3.Connection, txn_id: str):
     return conn.execute(
         """
         SELECT at.*, o.order_date, o.order_url, o.order_total_cents, o.tax_cents
-        FROM amazon_transactions at
+        FROM retailer_transactions at
         LEFT JOIN orders o ON o.order_id = at.order_id
-        WHERE at.amazon_txn_id = ?
+        WHERE at.retailer_txn_id = ?
         """,
         (txn_id,),
     ).fetchone()
@@ -219,7 +219,7 @@ def _items_for_transaction(conn: sqlite3.Connection, txn_id: str):
             oit.method
         FROM order_item_transactions oit
         JOIN order_items oi ON oi.item_id = oit.item_id
-        WHERE oit.amazon_txn_id = ?
+        WHERE oit.retailer_txn_id = ?
         ORDER BY oi.item_id
         """,
         (txn_id,),
@@ -241,12 +241,12 @@ def _item_detail(conn: sqlite3.Connection, item_id: str):
 def _transactions_for_item(conn: sqlite3.Connection, item_id: str):
     return conn.execute(
         """
-        SELECT at.amazon_txn_id, at.order_id, at.txn_date, at.amount_cents, at.raw_label,
+        SELECT at.retailer_txn_id, at.order_id, at.txn_date, at.amount_cents, at.raw_label,
                oit.allocated_amount_cents, oit.method
         FROM order_item_transactions oit
-        JOIN amazon_transactions at ON at.amazon_txn_id = oit.amazon_txn_id
+        JOIN retailer_transactions at ON at.retailer_txn_id = oit.retailer_txn_id
         WHERE oit.item_id = ?
-        ORDER BY COALESCE(at.txn_date, '0000-00-00') DESC, at.amazon_txn_id
+        ORDER BY COALESCE(at.txn_date, '0000-00-00') DESC, at.retailer_txn_id
         """,
         (item_id,),
     ).fetchall()
@@ -330,7 +330,7 @@ def _render_transactions_view(conn: sqlite3.Connection, min_date: str, max_date:
     rows = _load_transactions(conn, q=q, start_date=start_date, end_date=end_date, limit=limit)
     table = [
         {
-            "amazon_txn_id": r["amazon_txn_id"],
+            "retailer_txn_id": r["retailer_txn_id"],
             "txn_date": r["txn_date"] or "",
             "order_id": r["order_id"],
             "amount": _fmt_money(r["amount_cents"]),
@@ -342,7 +342,7 @@ def _render_transactions_view(conn: sqlite3.Connection, min_date: str, max_date:
     ]
     selected = _selectable_table(table, "txns_table")
     if selected:
-        _set_route("Transaction Detail", txn_id=selected["amazon_txn_id"])
+        _set_route("Transaction Detail", txn_id=selected["retailer_txn_id"])
 
 
 def _render_items_view(conn: sqlite3.Connection, min_date: str, max_date: str) -> None:
@@ -358,7 +358,7 @@ def _render_items_view(conn: sqlite3.Connection, min_date: str, max_date: str) -
             "quantity": r["quantity"],
             "item_subtotal": _fmt_money(r["item_subtotal_cents"]),
             "item_tax": _fmt_money(r["item_tax_cents"]),
-            "amazon_transaction_id": r["amazon_transaction_id"] or "",
+            "retailer_transaction_id": r["retailer_transaction_id"] or "",
             "order_url": r["order_url"] or "",
         }
         for r in rows
@@ -391,7 +391,7 @@ def _render_order_detail(conn: sqlite3.Connection, order_id: str) -> None:
     tx_rows = _transactions_for_order(conn, order_id)
     tx_table = [
         {
-            "amazon_txn_id": t["amazon_txn_id"],
+            "retailer_txn_id": t["retailer_txn_id"],
             "txn_date": t["txn_date"] or "",
             "amount": _fmt_money(t["amount_cents"]),
             "payment_last4": t["payment_last4"] or "",
@@ -401,7 +401,7 @@ def _render_order_detail(conn: sqlite3.Connection, order_id: str) -> None:
     ]
     selected_tx = _selectable_table(tx_table, "order_detail_tx_table")
     if selected_tx:
-        _set_route("Transaction Detail", txn_id=selected_tx["amazon_txn_id"])
+        _set_route("Transaction Detail", txn_id=selected_tx["retailer_txn_id"])
 
     st.markdown("**Associated Items**")
     item_rows = _items_for_order(conn, order_id)
@@ -412,7 +412,7 @@ def _render_order_detail(conn: sqlite3.Connection, order_id: str) -> None:
             "quantity": i["quantity"],
             "item_subtotal": _fmt_money(i["item_subtotal_cents"]),
             "item_tax": _fmt_money(i["item_tax_cents"]),
-            "amazon_transaction_id": i["amazon_transaction_id"] or "",
+            "retailer_transaction_id": i["retailer_transaction_id"] or "",
         }
         for i in item_rows
     ]
@@ -501,7 +501,7 @@ def _render_item_detail(conn: sqlite3.Connection, item_id: str) -> None:
     tx_rows = _transactions_for_item(conn, item_id)
     tx_table = [
         {
-            "amazon_txn_id": t["amazon_txn_id"],
+            "retailer_txn_id": t["retailer_txn_id"],
             "order_id": t["order_id"],
             "txn_date": t["txn_date"] or "",
             "txn_amount": _fmt_money(t["amount_cents"]),
@@ -513,7 +513,7 @@ def _render_item_detail(conn: sqlite3.Connection, item_id: str) -> None:
     ]
     selected = _selectable_table(tx_table, "item_detail_tx_table")
     if selected:
-        _set_route("Transaction Detail", txn_id=selected["amazon_txn_id"])
+        _set_route("Transaction Detail", txn_id=selected["retailer_txn_id"])
 
 
 def main() -> None:

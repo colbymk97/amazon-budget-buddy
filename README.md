@@ -1,8 +1,11 @@
-# amazon_spending
+# amazon-spending
 
-Local-first tooling to collect and store personal Amazon order history in SQLite.
+Local-first tooling to collect and store retailer order history in SQLite and
+reconcile it with bank/card transactions. Supports Amazon today, with a
+pluggable adapter interface for adding new retailers (e.g. Target).
+All data stays on your machine — no cloud services required.
 
-## Quick Start
+## Installation
 
 ```bash
 python -m venv .venv
@@ -11,93 +14,262 @@ pip install -e .
 playwright install chromium
 ```
 
-Initialize database:
+---
+
+## Quick Start
 
 ```bash
-python -m amazon_spending init-db
+# 1. Initialize the database
+amazon-spending init-db
+
+# 2. Collect your Amazon orders (headless browser, auto-auth fallback)
+amazon-spending collect --retailer amazon --order-limit 100
+
+# 3. Browse orders in the local viewer
+amazon-spending view
 ```
 
-Collect Amazon orders (headless by default, auto-falls back to headed for auth/MFA):
+---
 
-```bash
-python -m amazon_spending collect-amazon --order-limit 100 --max-pages 20
+## CLI Reference
+
+```
+amazon-spending [--db PATH] [--version] [-h] <command> [options]
 ```
 
-Parse previously saved raw HTML into the DB without scraping (test run):
+### Global Options
 
-```bash
-python -m amazon_spending collect-amazon --test-run --order-limit 100
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--db PATH` | `data/amazon_spending.sqlite3` | SQLite database file path |
+| `--version` | — | Print version and exit |
+| `-h, --help` | — | Show help message and exit |
+
+Run `amazon-spending <command> --help` for detailed help on any command.
+
+---
+
+### `init-db`
+
+Initialize or migrate the SQLite schema.
+
+```
+amazon-spending init-db
 ```
 
-Optionally target a specific saved run directory:
+Safe to run on an existing database — missing tables and columns are added
+without touching existing data. Also runs the multi-retailer migration
+(renaming `amazon_transactions` → `retailer_transactions`, etc.) if needed.
+
+**Examples**
 
 ```bash
-python -m amazon_spending collect-amazon --test-run --saved-run-dir data/raw/amazon/20260216_081306
+amazon-spending init-db
+amazon-spending --db ~/my-data.sqlite3 init-db
 ```
 
-Open local viewer:
+---
 
-```bash
-python -m amazon_spending view
+### `collect`
+
+Scrape retailer order history into the local database.
+
+```
+amazon-spending collect --retailer <name> [options]
 ```
 
-## New UI (React + API)
+**Supported retailers:** `amazon`, `target` *(Target scraping is not yet implemented — see [Adding a New Retailer](#adding-a-new-retailer))*
 
-Run local API:
+#### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--retailer NAME` | *(required)* | Retailer to collect from |
+| `--start-date YYYY-MM-DD` | auto | Earliest order date (inclusive) |
+| `--end-date YYYY-MM-DD` | auto | Latest order date (inclusive) |
+| `--order-limit N` | unlimited | Maximum orders to collect |
+| `--max-pages N` | derived | Maximum listing pages to traverse |
+
+**Browser options**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--headed` | off | Force a visible browser window |
+| `--user-data-dir PATH` | `data/raw/<retailer>/browser_profile` | Persistent profile for session cookies |
+
+**Storage options**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--outdir PATH` | `data/raw/<retailer>` | Directory for raw HTML snapshots |
+| `--test-run` | off | Parse a saved snapshot without launching browser |
+| `--saved-run-dir PATH` | latest | Specific snapshot dir to parse (implies `--test-run`) |
+
+**Incremental sync options**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--stop-on-known` | off | Stop when a previously imported order is encountered |
+
+**Output options**
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Print results as JSON instead of plain text |
+
+**Examples**
 
 ```bash
+# Collect the most recent 50 Amazon orders
+amazon-spending collect --retailer amazon --order-limit 50
+
+# Collect a specific date range
+amazon-spending collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
+
+# First-time login / MFA — use a visible browser
+amazon-spending collect --retailer amazon --headed --order-limit 20
+
+# Fastest incremental sync
+amazon-spending collect --retailer amazon --stop-on-known
+
+# Re-parse saved HTML without launching a browser
+amazon-spending collect --retailer amazon --test-run
+
+# Machine-readable JSON output
+amazon-spending collect --retailer amazon --order-limit 10 --json
+```
+
+**Deprecated alias:** `collect-amazon` behaves identically to `collect --retailer amazon`.
+
+---
+
+### `import-transactions`
+
+Import bank or credit-card transactions from a CSV file.
+
+```
+amazon-spending import-transactions --csv PATH [--account-id ID] [--json]
+```
+
+#### Required CSV Columns
+
+| Column | Description |
+|--------|-------------|
+| `transaction_id` | Unique identifier for the transaction |
+| `posted_date` | ISO date posted (`YYYY-MM-DD`) |
+| `amount` | Amount in dollars (e.g. `42.99`) |
+| `merchant_raw` | Raw merchant name from the statement |
+
+#### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--csv PATH` | *(required)* | Path to the CSV file |
+| `--account-id ID` | none | Tag rows with an account label |
+| `--json` | off | Print results as JSON |
+
+**Examples**
+
+```bash
+amazon-spending import-transactions --csv data/transactions.csv
+amazon-spending import-transactions --csv data/amex.csv --account-id amex-gold
+```
+
+---
+
+### `export`
+
+Export reconciliation reports to CSV files.
+
+```
+amazon-spending export [--outdir PATH] [--json]
+```
+
+| Output File | Description |
+|------------|-------------|
+| `report_transaction_itemized.csv` | Each transaction matched to its order items |
+| `report_unmatched.csv` | Transactions with no order match |
+| `report_monthly_summary.csv` | Monthly totals by essential flag |
+
+**Examples**
+
+```bash
+amazon-spending export
+amazon-spending export --outdir ~/reports/2024
+```
+
+---
+
+### `view`
+
+Open the local Streamlit web viewer.
+
+```
+amazon-spending view [--host HOST] [--port PORT]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host HOST` | `127.0.0.1` | Viewer server host |
+| `--port PORT` | `8501` | Viewer server port |
+
+> Requires Streamlit: `pip install streamlit`
+
+---
+
+## React UI + API Server
+
+```bash
+# Terminal 1 — API server
 uvicorn amazon_spending.api:app --reload --host 127.0.0.1 --port 8000
+
+# Terminal 2 — React frontend
+cd frontend && npm install && npm run dev
 ```
 
-Run React frontend:
+| Service | URL |
+|---------|-----|
+| React frontend | `http://127.0.0.1:5173` |
+| API server | `http://127.0.0.1:8000` |
 
-```bash
-cd frontend
-npm install
-npm run dev
+---
+
+## Adding a New Retailer
+
+1. Create `amazon_spending/retailers/<name>.py` implementing `RetailerCollector`:
+
+```python
+from amazon_spending.retailers.base import CollectResult, RetailerCollector
+
+class TargetCollector(RetailerCollector):
+    RETAILER_ID = "target"
+
+    def collect(self, conn, output_dir, **kwargs) -> CollectResult:
+        # scrape Target order history and reconcile into the DB
+        ...
 ```
 
-Frontend default URL: `http://127.0.0.1:5173`  
-API default URL: `http://127.0.0.1:8000`
+2. Register it in `amazon_spending/retailers/__init__.py`:
 
-Set API base if needed:
+```python
+from .target import TargetCollector
 
-```bash
-VITE_API_BASE=http://127.0.0.1:8000 npm run dev
+REGISTRY = {
+    "amazon": AmazonCollector(),
+    "target": TargetCollector(),
+}
 ```
 
-### How Incremental Import Decides How Far To Scan
+That's it — the CLI, API, and DB schema all pick it up automatically.
+Each retailer's orders get a `retailer` column in the `orders` and
+`retailer_transactions` tables so data from all retailers coexists cleanly.
 
-The dashboard "Import New Data" flow uses a targeted incremental scan instead of blindly walking a fixed number of pages.
+---
 
-- It first looks up the most recent imported order date in SQLite.
-- It also loads a small set of the most recently imported order IDs (currently the latest 30).
-- The scraper starts near the top of Amazon's order history and keeps collecting listing pages until it sees one of those already-known order IDs again.
-- That overlap is treated as the handoff point: once we have reached orders we already imported, the scraper stops going deeper and then fetches details for the newly discovered orders in that window.
-- A small date overlap is still applied (`start_date` is backed up by a couple of days) so the importer can safely re-read borderline orders and reconcile updates.
-- There is still a safety page cap to avoid runaway scans if Amazon changes the page structure, but the normal stop condition is overlap with known orders, not the cap.
-- If headless mode loads the shell of the page but does not surface usable order data, the API retries once in a visible browser window using the same persistent profile.
+## Database Schema Notes
 
-## Viewer
-
-- URL: `http://127.0.0.1:8501`
-- Filter by date range and text (order ID or item text).
-- Browse orders and inspect item/shipment details.
-
-## Optional: Import bank transactions (stored only)
-
-```bash
-python -m amazon_spending import-transactions --csv data/transactions.csv --account-id chase-freedom
-```
-
-This currently only stores transactions in SQLite for future export/reconciliation features.
-
-## Notes
-
-- Database defaults to `./data/amazon_spending.sqlite3`.
-- `collect-amazon` stores raw HTML snapshots under `data/raw/amazon/<timestamp>/`.
-- End of every collect run performs DB reconciliation and prints inserted/updated/unchanged counts.
-- Incremental API imports are overlap-driven: they stop when the listing reaches orders already present in the local database, then report how many new orders were found since the last imported order date.
-- Collector also pulls related Amazon payment transactions and stores:
-  - `amazon_transactions` (per-order Amazon transaction records)
-  - `order_item_transactions` (item-to-transaction links)
+- All data is stored in `data/amazon_spending.sqlite3` by default.
+- `orders.retailer` and `retailer_transactions.retailer` identify which retailer each row came from.
+- Existing Amazon-only databases are migrated automatically on `init-db` or first run:
+  `amazon_transactions` → `retailer_transactions`, `amazon_txn_id` → `retailer_txn_id`.
+- Raw HTML snapshots are saved under `data/raw/<retailer>/<timestamp>/`.

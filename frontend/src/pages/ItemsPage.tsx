@@ -32,7 +32,7 @@ export function ItemsPage() {
       { accessorKey: "quantity", header: "Qty" },
       { accessorKey: "item_subtotal_cents", header: "Subtotal", cell: (c) => formatMoney(c.getValue<number>()) },
       { accessorKey: "item_tax_cents", header: "Tax", cell: (c) => formatMoney(c.getValue<number | null>()) },
-      { accessorKey: "amazon_transaction_id", header: "Primary Txn" }
+      { accessorKey: "retailer_transaction_id", header: "Primary Txn" }
     ],
     []
   );

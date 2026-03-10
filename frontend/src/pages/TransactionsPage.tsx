@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { ColumnDef } from "@tanstack/react-table";
 import { useNavigate } from "react-router-dom";
 import { formatMoney, listTransactions } from "../api";
-import type { AmazonTransaction } from "../types";
+import type { RetailerTransaction } from "../types";
 import { DataTable } from "../components/DataTable";
 
 export function TransactionsPage() {
-  const [rows, setRows] = useState<AmazonTransaction[]>([]);
+  const [rows, setRows] = useState<RetailerTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -24,9 +24,10 @@ export function TransactionsPage() {
       .finally(() => setLoading(false));
   }, [search, startDate, endDate]);
 
-  const columns = useMemo<ColumnDef<AmazonTransaction>[]>(
+  const columns = useMemo<ColumnDef<RetailerTransaction>[]>(
     () => [
-      { accessorKey: "amazon_txn_id", header: "Transaction ID" },
+      { accessorKey: "retailer_txn_id", header: "Transaction ID" },
+      { accessorKey: "retailer", header: "Retailer" },
       { accessorKey: "txn_date", header: "Txn Date" },
       { accessorKey: "order_id", header: "Order ID" },
       { accessorKey: "amount_cents", header: "Amount", cell: (c) => formatMoney(c.getValue<number>()) },
@@ -52,7 +53,7 @@ export function TransactionsPage() {
         columns={columns}
         globalFilter={globalFilter}
         onGlobalFilterChange={setGlobalFilter}
-        onRowClick={(r) => navigate(`/transactions/${r.amazon_txn_id}`)}
+        onRowClick={(r) => navigate(`/transactions/${r.retailer_txn_id}`)}
       />
     </>
   );
