@@ -219,6 +219,25 @@ def get_retailer_account(conn: sqlite3.Connection, retailer: str) -> sqlite3.Row
     ).fetchone()
 
 
+def recent_retailer_order_ids(
+    conn: sqlite3.Connection,
+    retailer: str,
+    *,
+    limit: int = 100,
+) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT order_id
+        FROM orders
+        WHERE retailer = ?
+        ORDER BY order_date DESC, created_at DESC
+        LIMIT ?
+        """,
+        (retailer, limit),
+    ).fetchall()
+    return [row["order_id"] for row in rows]
+
+
 def ensure_retailer_account(
     conn: sqlite3.Connection,
     retailer: str,

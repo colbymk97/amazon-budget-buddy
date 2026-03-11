@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from html import unescape
@@ -33,6 +34,12 @@ ITEM_IMAGE_QTY_RE = re.compile(
     r'od-item-view-qty">\s*<span>\s*(\d+)\s*</span>',
     flags=re.IGNORECASE | re.DOTALL,
 )
+
+
+@dataclass(frozen=True)
+class ListingOrderSummary:
+    order_id: str
+    order_date: str | None = None
 
 
 def _to_cents(text: str | None) -> int | None:
@@ -699,18 +706,49 @@ def _reconcile_item_transaction_links(
     return links_written
 
 
-def _extract_order_ids_from_listing(page) -> list[str]:
-    html = page.content()
-    ids = re.findall(r"orderID=(\d{3}-\d{7}-\d{7})", html)
-    deduped: list[str] = []
+def _extract_listing_order_summaries_from_html(html: str) -> list[ListingOrderSummary]:
+    matches = list(re.finditer(r"orderID=(\d{3}-\d{7}-\d{7})", html))
+    if not matches:
+        return []
+
+    boundaries = [0]
+    for idx in range(len(matches) - 1):
+        boundaries.append((matches[idx].start() + matches[idx + 1].start()) // 2)
+    boundaries.append(len(html))
+
+    summaries: list[ListingOrderSummary] = []
     seen: set[str] = set()
-    for oid in ids:
-        if oid == "000-0000000-8675309":
+    for idx, match in enumerate(matches):
+        order_id = match.group(1)
+        if order_id == "000-0000000-8675309" or order_id in seen:
             continue
-        if oid not in seen:
-            seen.add(oid)
-            deduped.append(oid)
-    return deduped
+        seen.add(order_id)
+
+        segment = html[boundaries[idx] : boundaries[idx + 1]]
+        order_date = _extract_order_date(segment)
+        if order_date is None:
+            ordered_on_match = re.search(
+                r"(?:ORDER PLACED|Ordered on)\s*:?\s*([A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+                segment,
+                flags=re.IGNORECASE,
+            )
+            if ordered_on_match:
+                order_date = _normalize_date_text(ordered_on_match.group(1))
+        if order_date is None:
+            date_match = DATE_RE.search(segment)
+            if date_match:
+                order_date = _normalize_date_text(date_match.group(1))
+
+        summaries.append(ListingOrderSummary(order_id=order_id, order_date=order_date))
+    return summaries
+
+
+def _extract_listing_order_summaries(page) -> list[ListingOrderSummary]:
+    return _extract_listing_order_summaries_from_html(page.content())
+
+
+def _extract_order_ids_from_listing(page) -> list[str]:
+    return [summary.order_id for summary in _extract_listing_order_summaries(page)]
 
 
 def _parse_order_details(
@@ -829,6 +867,40 @@ def _in_date_range(order_date: str, start_date: str | None, end_date: str | None
     if end_date and order_date > end_date:
         return False
     return True
+
+
+def _should_skip_detail_fetch(
+    listing_order: ListingOrderSummary,
+    start_date: str | None,
+    end_date: str | None,
+) -> bool:
+    return bool(listing_order.order_date and not _in_date_range(listing_order.order_date, start_date, end_date))
+
+
+def _merge_listing_orders(
+    current_orders: list[ListingOrderSummary],
+    seen_orders: set[str],
+    known_order_id_set: set[str],
+    collected_orders: list[ListingOrderSummary],
+    order_limit: int | None,
+) -> tuple[list[ListingOrderSummary], set[str], bool]:
+    matched_known_order_ids: set[str] = set()
+    stop_after_known_order = False
+
+    for listing_order in current_orders:
+        oid = listing_order.order_id
+        if oid in seen_orders:
+            continue
+        seen_orders.add(oid)
+        if oid in known_order_id_set:
+            matched_known_order_ids.add(oid)
+            stop_after_known_order = True
+            break
+        collected_orders.append(listing_order)
+        if order_limit and len(collected_orders) >= order_limit:
+            break
+
+    return collected_orders, matched_known_order_ids, stop_after_known_order
 
 
 def _needs_auth(page) -> bool:
@@ -1214,7 +1286,7 @@ def collect_amazon(
             context.close()
             return CollectResult(status="error", notes=str(exc))
 
-        order_ids: list[str] = []
+        listing_orders: list[ListingOrderSummary] = []
         page_num = 1
         while True:
             if should_abort and should_abort():
@@ -1234,27 +1306,26 @@ def collect_amazon(
             (run_dir / f"orders_page_{page_num}.html").write_text(html, encoding="utf-8")
             listing_pages_scanned = page_num
 
-            current_ids = _extract_order_ids_from_listing(page)
-            for oid in current_ids:
-                if oid not in seen_orders:
-                    seen_orders.add(oid)
-                    order_ids.append(oid)
-                if oid in known_order_id_set:
-                    matched_known_order_ids.add(oid)
-            discovered_order_count = len(order_ids)
+            current_orders = _extract_listing_order_summaries(page)
+            listing_orders, page_known_matches, stop_after_known_order = _merge_listing_orders(
+                current_orders,
+                seen_orders,
+                known_order_id_set,
+                listing_orders,
+                order_limit,
+            )
+            matched_known_order_ids.update(page_known_matches)
+            for oid in page_known_matches:
+                print(f"[orders] encountered known order_id={oid}; stopping listing scan")
+            discovered_order_count = len(listing_orders)
             print(
                 f"[orders] page={page_num} discovered_total={discovered_order_count} "
                 f"matched_known={len(matched_known_order_ids)}"
             )
 
-            if order_limit and len(order_ids) >= order_limit:
+            if order_limit and len(listing_orders) >= order_limit:
                 break
-            if (
-                not order_limit
-                and known_order_id_set
-                and len(matched_known_order_ids) >= max(1, overlap_match_threshold)
-            ):
-                print("[orders] stopping after matching recent imported orders on listing pages")
+            if stop_after_known_order:
                 break
             if effective_max_pages is not None and page_num >= effective_max_pages:
                 break
@@ -1266,17 +1337,41 @@ def collect_amazon(
             page_num += 1
 
         if order_limit:
-            order_ids = order_ids[:order_limit]
+            listing_orders = listing_orders[:order_limit]
 
         consecutive_older_than_start = 0
-        for idx, order_id in enumerate(order_ids, start=1):
+        for idx, listing_order in enumerate(listing_orders, start=1):
             if should_abort and should_abort():
                 context.close()
                 return CollectResult(status="cancelled", notes="Import cancelled by user.")
-            print(f"[details] processing {idx}/{len(order_ids)} order_id={order_id}")
+            order_id = listing_order.order_id
+            print(f"[details] processing {idx}/{len(listing_orders)} order_id={order_id}")
+            stop_due_to_age = False
+            if _should_skip_detail_fetch(listing_order, start_date, end_date):
+                is_before_start = bool(
+                    start_date and listing_order.order_date and listing_order.order_date < start_date
+                )
+                if is_before_start:
+                    consecutive_older_than_start += 1
+                else:
+                    consecutive_older_than_start = 0
+                print(f"[details] skipped order_id={order_id} (outside date range from listing)")
+                if (
+                    stop_when_before_start_date
+                    and start_date
+                    and not end_date
+                    and is_before_start
+                    and consecutive_older_than_start >= 3
+                ):
+                    print(
+                        "[details] stopping early: encountered multiple consecutive "
+                        "orders older than incremental start date"
+                    )
+                    break
+                continue
+
             detail_url = f"https://www.amazon.com/gp/your-account/order-details?orderID={order_id}"
             detail_page = context.new_page()
-            stop_due_to_age = False
             try:
                 detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
                 detail_html = detail_page.content()
@@ -1336,6 +1431,8 @@ def collect_amazon(
                     else:
                         if is_before_start:
                             consecutive_older_than_start += 1
+                        else:
+                            consecutive_older_than_start = 0
                         print(f"[details] skipped order_id={order_id} (outside date range)")
                         if (
                             stop_when_before_start_date

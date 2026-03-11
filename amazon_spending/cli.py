@@ -14,6 +14,7 @@ from .db import (
     ensure_retailer_account,
     get_retailer_account,
     init_db,
+    recent_retailer_order_ids,
     record_retailer_import_run,
 )
 from .exporter import export_reports
@@ -598,6 +599,7 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
 
     # --saved-run-dir implies --test-run
     test_run = args.test_run or (args.saved_run_dir is not None)
+    known_order_ids = recent_retailer_order_ids(conn, retailer_id) if args.stop_on_known else None
 
     result = collector.collect(
         conn=conn,
@@ -611,6 +613,7 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         test_run=test_run,
         saved_run_dir=args.saved_run_dir,
         stop_when_before_start_date=args.stop_on_known,
+        known_order_ids=known_order_ids,
     )
 
     bound_account = get_retailer_account(conn, retailer_id)
