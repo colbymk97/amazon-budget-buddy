@@ -10,8 +10,10 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Callable
 
+from ..db import ensure_retailer_account, normalize_account_key
 from .base import (
     CollectResult,
+    LoginResult,
     ParsedOrder,
     ParsedItem,
     ParsedRetailerTransaction,
@@ -876,6 +878,51 @@ def _orders_page_ready(page) -> bool:
     return _wait_for_orders_page_ready(page, timeout_ms=12000)
 
 
+def _is_logged_in_homepage(page) -> bool:
+    """Return True if the Amazon homepage is showing a logged-in session."""
+    url = page.url.lower()
+    if any(token in url for token in ("ap/signin", "ap/cvf", "validatecaptcha", "challenge")):
+        return False
+    try:
+        greeting = page.locator("#nav-link-accountList-nav-line-1").text_content(timeout=3000) or ""
+        return "sign in" not in greeting.lower()
+    except Exception:
+        content = page.content().lower()
+        return "hello, sign in" not in content and "hello," in content
+
+
+def _current_account_label(page) -> str | None:
+    try:
+        greeting = page.locator("#nav-link-accountList-nav-line-1").text_content(timeout=3000) or ""
+    except Exception:
+        greeting = ""
+
+    greeting = re.sub(r"\s+", " ", greeting).strip()
+    if not greeting or "sign in" in greeting.lower():
+        return None
+    if greeting.lower().startswith("hello,"):
+        greeting = greeting.split(",", 1)[1].strip()
+    return greeting or None
+
+
+def _current_account_identity(page) -> tuple[str | None, str | None]:
+    label = _current_account_label(page)
+    if label is None:
+        return None, None
+    return label, normalize_account_key(label)
+
+
+def _wait_for_login(page, timeout_s: int = 300) -> bool:
+    """Poll until the user logs in or timeout_s elapses. Returns True if logged in."""
+    import time
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if _is_logged_in_homepage(page):
+            return True
+        page.wait_for_timeout(2000)
+    return False
+
+
 def _launch_and_open_orders(p, profile_dir: Path, headless: bool):
     context = p.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
@@ -885,6 +932,18 @@ def _launch_and_open_orders(p, profile_dir: Path, headless: bool):
     page = context.new_page()
     page.goto("https://www.amazon.com/gp/your-account/order-history", wait_until="domcontentloaded")
     return context, page
+
+
+def _session_is_logged_in(context) -> tuple[bool, str | None, str | None]:
+    page = context.new_page()
+    try:
+        page.goto(_AMAZON_HOME, wait_until="domcontentloaded")
+        if not _is_logged_in_homepage(page):
+            return False, None, None
+        account_label, account_key = _current_account_identity(page)
+        return True, account_label, account_key
+    finally:
+        page.close()
 
 
 def _resolve_saved_run_dir(output_dir: Path, saved_run_dir: Path | None) -> Path | None:
@@ -1093,7 +1152,16 @@ def collect_amazon(
             return CollectResult(status="cancelled", notes="Import cancelled by user.")
         context, page = _launch_and_open_orders(p, profile_dir, headless=headless)
         if not _orders_page_ready(page):
+            logged_in, account_label, account_key = _session_is_logged_in(context)
             context.close()
+            if logged_in:
+                return CollectResult(
+                    status="error",
+                    notes=(
+                        "Amazon session looks logged in, but the Orders page did not become ready in headless mode. "
+                        "Retry with --headed if Amazon is challenging the browser or serving a partially rendered page."
+                    ),
+                )
             if not allow_interactive_auth:
                 return CollectResult(
                     status="auth_required",
@@ -1121,6 +1189,30 @@ def collect_amazon(
                     status="auth_required",
                     notes="Could not establish authenticated session after manual login.",
                 )
+
+        account_label, account_key = _current_account_identity(page)
+        if account_label is None or account_key is None:
+            logged_in, account_label, account_key = _session_is_logged_in(context)
+        if account_label is None or account_key is None:
+            context.close()
+            return CollectResult(
+                status="error",
+                notes=(
+                    "Authenticated Amazon session found, but the signed-in account could not be "
+                    "resolved. Refusing to import because this database is bound to one Amazon account."
+                ),
+            )
+        try:
+            ensure_retailer_account(
+                conn,
+                "amazon",
+                account_label,
+                account_key=account_key,
+                profile_path=str(profile_dir),
+            )
+        except Exception as exc:
+            context.close()
+            return CollectResult(status="error", notes=str(exc))
 
         order_ids: list[str] = []
         page_num = 1
@@ -1293,10 +1385,97 @@ def collect_amazon(
     )
 
 
+_DEFAULT_AMAZON_PROFILE = Path("data/raw/amazon/browser_profile")
+_AMAZON_HOME = "https://www.amazon.com"
+
+
 class AmazonCollector(RetailerCollector):
     """Retailer adapter for Amazon order history."""
 
     RETAILER_ID = "amazon"
+
+    def login(
+        self,
+        user_data_dir: Path | None = None,
+        *,
+        check_only: bool = False,
+        timeout_s: int = 300,
+    ) -> LoginResult:
+        """Open a headed browser so the user can log in to Amazon.
+
+        If check_only=True, runs headless and immediately returns whether the
+        stored session is still valid — useful for scripting.
+
+        The browser reuses the same persistent Chromium profile as `collect`,
+        so a successful login here means `collect` will also work without
+        prompting.
+        """
+        from playwright.sync_api import sync_playwright
+
+        profile_dir = user_data_dir or _DEFAULT_AMAZON_PROFILE
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        headless = check_only
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                user_data_dir=str(profile_dir),
+                headless=headless,
+                viewport={"width": 1400, "height": 1000},
+            )
+            try:
+                page = context.new_page()
+                page.goto(_AMAZON_HOME, wait_until="domcontentloaded")
+
+                if _is_logged_in_homepage(page):
+                    account_label, account_key = _current_account_identity(page)
+                    return LoginResult(
+                        status="logged_in",
+                        message="Already logged in to Amazon.",
+                        already_logged_in=True,
+                        account_label=account_label,
+                        account_key=account_key,
+                    )
+
+                if check_only:
+                    return LoginResult(
+                        status="login_required",
+                        message="Not logged in. Run 'amazon-spending login --retailer amazon' to authenticate.",
+                    )
+
+                print(
+                    "Amazon login required.\n"
+                    "Complete sign-in (including any MFA) in the browser window.\n"
+                    "This window will close automatically once you are signed in.\n"
+                    f"(Waiting up to {timeout_s}s…)"
+                )
+
+                logged_in = _wait_for_login(page, timeout_s=timeout_s)
+            finally:
+                context.close()
+
+        if logged_in:
+            with sync_playwright() as p:
+                context = p.chromium.launch_persistent_context(
+                    user_data_dir=str(profile_dir),
+                    headless=True,
+                    viewport={"width": 1400, "height": 1000},
+                )
+                try:
+                    page = context.new_page()
+                    page.goto(_AMAZON_HOME, wait_until="domcontentloaded")
+                    account_label, account_key = _current_account_identity(page)
+                finally:
+                    context.close()
+            return LoginResult(
+                status="logged_in",
+                message="Login successful. Session saved.",
+                account_label=account_label,
+                account_key=account_key,
+            )
+        return LoginResult(
+            status="timeout",
+            message=f"Timed out after {timeout_s}s without detecting a successful login.",
+        )
 
     def collect(
         self,

@@ -1,125 +1,262 @@
-flowchart TD
-    A[Amazon Spending Reconciler<br/>Personal Account] --> B[Goals]
-    A --> C[Constraints]
-    A --> D[Architecture]
-    A --> E[Execution Phases]
-    A --> F[Matching Strategy]
-    A --> G[Data Model]
-    A --> H[Risk Controls]
-    A --> I[Deliverables]
+# Multi-Retailer Refactor Plan
 
-    B --> B1[Per-transaction report by date range or order limit]
-    B --> B2[Link card/bank transaction -> Amazon order -> line items]
-    B --> B3[Handle split charges across shipments]
-    B --> B4[Export clean CSV for Copilot recategorization workflow]
-    B --> B5[Flag essential vs nonessential]
+## Goal
 
-    C --> C1[No official personal buyer API]
-    C --> C2[Must support MFA and occasional captcha/manual intervention]
-    C --> C3[Scraping fragility expected; design retry + resume]
-    C --> C4[Local-first, user-controlled data storage]
+Introduce a retailer adapter architecture so Amazon, Target, and future retailers
+all plug into the same collection pipeline and shared SQLite schema. The CLI
+exposes `collect --retailer amazon|target`; the DB stores all retailers in a
+unified `retailer_transactions` table.
 
-    D --> D1[Collector Layer]
-    D --> D2[Normalizer Layer]
-    D --> D3[Matcher Layer]
-    D --> D4[Review Layer]
-    D --> D5[Exporter Layer]
+---
 
-    D1 --> D1a[Amazon Collector: Playwright login + orders + order detail pages]
-    D1 --> D1b[Finance Collector: Copilot/Bank CSV import]
+## New Directory Layout
 
-    D2 --> D2a[Canonical schema across orders, shipments, items, transactions]
-    D2 --> D2b[Currency normalization + timezone normalization]
+```
+amazon_spending/
+  retailers/
+    __init__.py        # REGISTRY dict mapping retailer ID → collector class
+    base.py            # RetailerCollector ABC + shared dataclasses
+    amazon.py          # Amazon collector (content of current collector.py)
+    target.py          # Target collector stub
+  collector.py         # → thin shim: re-exports collect_amazon for api.py compat
+  db.py                # + _migrate_to_multi_retailer() migration step
+  sql/schema.sql       # updated: retailer_transactions, retailer_txn_id, retailer col
+  cli.py               # collect --retailer amazon|target
+  api.py               # updated imports + SQL + renamed path params
+  exporter.py          # no changes needed
+  matcher.py           # check for any amazon_transactions references
+  importers.py         # check for any amazon_transactions references
+```
 
-    D3 --> D3a[Deterministic exact matching rules]
-    D3 --> D3b[Scored candidate ranking for ambiguous cases]
-    D3 --> D3c[Proportional fallback allocator]
+---
 
-    D4 --> D4a[Review queue for low-confidence matches]
-    D4 --> D4b[Manual override table + audit trail]
+## Step-by-step Changes
 
-    D5 --> D5a[transaction_item_report.csv]
-    D5 --> D5b[monthly_essential_vs_nonessential.csv]
-    D5 --> D5c[unmatched_transactions.csv]
+### 1. `amazon_spending/retailers/base.py` (new)
 
-    F --> F1[Step 1: Shipment-level exact amount match]
-    F --> F2[Step 2: Order-level exact amount match]
-    F --> F3[Step 3: Date-window candidate scoring]
-    F --> F4[Step 4: Proportional line-item allocation]
-    F --> F5[Step 5: Manual review if confidence below threshold]
+Move shared dataclasses out of `collector.py` and into this module:
+- `CollectResult`
+- `ParsedOrder`
+- `ParsedItem`
+- `ParsedRetailerTransaction` (rename from `ParsedAmazonTransaction`, add `retailer: str` field)
 
-    F1 --> F1a[amount_diff == 0 and date_delta <= 3 days]
-    F3 --> F3a[score = amount_similarity + date_similarity + residual_balance_fit]
-    F4 --> F4a[Allocate by item subtotal weights among remaining unmatched items]
-    F5 --> F5a[confidence < 0.80 -> review_queue]
+Define the abstract base:
+```python
+class RetailerCollector(ABC):
+    RETAILER_ID: ClassVar[str]
 
-    G --> G1[orders]
-    G --> G2[shipments]
-    G --> G3[order_items]
-    G --> G4[transactions]
-    G --> G5[matches]
-    G --> G6[manual_overrides]
+    @abstractmethod
+    def collect(
+        self,
+        conn: sqlite3.Connection,
+        output_dir: Path,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        order_limit: int | None = None,
+        max_pages: int | None = None,
+        headless: bool = True,
+        user_data_dir: Path | None = None,
+        test_run: bool = False,
+        saved_run_dir: Path | None = None,
+        allow_interactive_auth: bool = True,
+        should_abort: Callable[[], bool] | None = None,
+        stop_when_before_start_date: bool = False,
+        known_order_ids: list[str] | None = None,
+        overlap_match_threshold: int = 1,
+    ) -> CollectResult: ...
+```
 
-    G1 --> G1a[order_id, order_date, total, tax, shipping, payment_last4]
-    G2 --> G2a[shipment_id, order_id, ship_date, shipment_total]
-    G3 --> G3a[item_id, order_id, title, qty, item_subtotal, item_tax]
-    G4 --> G4a[txn_id, posted_date, amount, merchant_raw, account_id]
-    G5 --> G5a[txn_id, order_id/shipment_id, item_id, allocated_amount, confidence, method]
-    G6 --> G6a[override_id, target_txn_id, selected_order_or_item, reason, created_at]
+### 2. `amazon_spending/retailers/amazon.py` (new — move from collector.py)
 
-    E --> P0[Phase 0: Repo bootstrap]
-    E --> P1[Phase 1: Ingestion MVP]
-    E --> P2[Phase 2: Matching engine]
-    E --> P3[Phase 3: Review + overrides]
-    E --> P4[Phase 4: Essential labeling]
-    E --> P5[Phase 5: Hardening and automation]
+- Copy full content of `collector.py`
+- Replace `ParsedAmazonTransaction` with `ParsedRetailerTransaction` (import from base)
+- Wrap the module-level `collect_amazon()` function inside `class AmazonCollector(RetailerCollector):`
+  with `RETAILER_ID = "amazon"` and a `collect()` method that delegates to the
+  existing function body
+- All SQL stays the same but uses renamed DB columns (`retailer_txn_id`, `retailer_transactions`)
+- `_reconcile_amazon_transactions()` → `_reconcile_retailer_transactions()`
+  inserts `retailer = 'amazon'` on every row
 
-    P0 --> P0a[Set up Python project + CLI + SQLite]
-    P0 --> P0b[Add sample fixtures and smoke tests]
+### 3. `amazon_spending/retailers/target.py` (new — stub)
 
-    P1 --> P1a[Import bank/Copilot transactions CSV]
-    P1 --> P1b[Manual Amazon order CSV/json import (bootstrap path)]
-    P1 --> P1c[Generate first unmatched report]
+```python
+class TargetCollector(RetailerCollector):
+    RETAILER_ID = "target"
 
-    P2 --> P2a[Implement 5-step matching pipeline]
-    P2 --> P2b[Compute confidence and match_method]
-    P2 --> P2c[Persist allocations and residuals]
+    def collect(self, conn, output_dir, **kwargs) -> CollectResult:
+        raise NotImplementedError(
+            "Target scraping is not yet implemented. "
+            "Contributions welcome — see retailers/base.py for the interface."
+        )
+```
 
-    P3 --> P3a[CLI review commands: list/apply overrides]
-    P3 --> P3b[Regenerate reports with overrides applied]
+### 4. `amazon_spending/retailers/__init__.py` (new)
 
-    P4 --> P4a[Rule-based essential classifier (keywords + curated list)]
-    P4 --> P4b[Allow household-specific override tags]
-    P4 --> P4c[Emit monthly essential/nonessential summaries]
+```python
+from .base import RetailerCollector, CollectResult
+from .amazon import AmazonCollector
+from .target import TargetCollector
 
-    P5 --> P5a[Playwright Amazon collector with resume checkpoints]
-    P5 --> P5b[Idempotent reruns + dedupe keys]
-    P5 --> P5c[Regression tests against real anonymized samples]
+REGISTRY: dict[str, RetailerCollector] = {
+    "amazon": AmazonCollector(),
+    "target": TargetCollector(),
+}
+```
 
-    H --> H1[Secrets handling]
-    H --> H2[Operational safety]
-    H --> H3[Data quality checks]
+### 5. `amazon_spending/sql/schema.sql` (modify)
 
-    H1 --> H1a[No credentials stored in repo; use keychain/env only]
-    H2 --> H2a[Rate limiting + random jitter + exponential backoff]
-    H2 --> H2b[Checkpoint each page/order for safe restart]
-    H3 --> H3a[Validate totals: sum(item allocations) == transaction amount]
-    H3 --> H3b[Detect duplicate imports by stable hash keys]
+Rename for fresh installs:
+- `amazon_transactions` → `retailer_transactions`
+- `amazon_txn_id` → `retailer_txn_id`
+- `order_items.amazon_transaction_id` → `order_items.retailer_transaction_id`
+- `order_item_transactions.amazon_txn_id` → `order_item_transactions.retailer_txn_id`
+- Add `retailer TEXT NOT NULL DEFAULT 'amazon'` to `orders`
+- Add `retailer TEXT NOT NULL DEFAULT 'amazon'` to `retailer_transactions`
+- Update all index names accordingly
 
-    I --> I1[CLI commands]
-    I --> I2[Core outputs]
-    I --> I3[Definition of done]
+### 6. `amazon_spending/db.py` (modify)
 
-    I1 --> I1a[collect-amazon]
-    I1 --> I1b[import-transactions]
-    I1 --> I1c[match]
-    I1 --> I1d[review]
-    I1 --> I1e[export]
+Add `_migrate_to_multi_retailer(conn)` called inside `init_db()` before the schema script:
 
-    I2 --> I2a[report_transaction_itemized.csv]
-    I2 --> I2b[report_unmatched.csv]
-    I2 --> I2c[report_monthly_summary.csv]
+```python
+def _migrate_to_multi_retailer(conn: sqlite3.Connection) -> None:
+    """One-time migration: rename amazon_* → retailer_* and add retailer column."""
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    )}
 
-    I3 --> I3a[>=95% transaction coverage for selected period]
-    I3 --> I3b[All low-confidence items present in review queue]
-    I3 --> I3c[Re-runs produce stable deterministic outputs]
+    # 1. Rename the table
+    if "amazon_transactions" in tables and "retailer_transactions" not in tables:
+        conn.execute("ALTER TABLE amazon_transactions RENAME TO retailer_transactions")
+
+    # 2. Rename primary key column on retailer_transactions
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(retailer_transactions)")}
+    if cols and "amazon_txn_id" in cols:
+        conn.execute("ALTER TABLE retailer_transactions RENAME COLUMN amazon_txn_id TO retailer_txn_id")
+
+    # 3. Add retailer column to retailer_transactions
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(retailer_transactions)")}
+    if cols and "retailer" not in cols:
+        conn.execute("ALTER TABLE retailer_transactions ADD COLUMN retailer TEXT NOT NULL DEFAULT 'amazon'")
+
+    # 4. Rename FK column in order_items
+    item_cols = {r["name"] for r in conn.execute("PRAGMA table_info(order_items)")}
+    if item_cols and "amazon_transaction_id" in item_cols:
+        conn.execute("ALTER TABLE order_items RENAME COLUMN amazon_transaction_id TO retailer_transaction_id")
+
+    # 5. Rename FK/PK column in order_item_transactions
+    oit_cols = {r["name"] for r in conn.execute("PRAGMA table_info(order_item_transactions)")}
+    if oit_cols and "amazon_txn_id" in oit_cols:
+        conn.execute("ALTER TABLE order_item_transactions RENAME COLUMN amazon_txn_id TO retailer_txn_id")
+
+    # 6. Add retailer column to orders
+    order_cols = {r["name"] for r in conn.execute("PRAGMA table_info(orders)")}
+    if order_cols and "retailer" not in order_cols:
+        conn.execute("ALTER TABLE orders ADD COLUMN retailer TEXT NOT NULL DEFAULT 'amazon'")
+
+    conn.commit()
+```
+
+Update `_ensure_columns()` to reference the new column/table names.
+
+### 7. `amazon_spending/cli.py` (modify)
+
+Replace `collect-amazon` subcommand with `collect`:
+
+```
+amazon-spending collect --retailer amazon [options]
+amazon-spending collect --retailer target [options]
+```
+
+- `--retailer` becomes a required flag with `choices=list(REGISTRY)`
+- All other flags stay the same (they're passed through to the retailer adapter)
+- Raw HTML output directory defaults to `data/raw/{retailer}` (retailer-namespaced)
+- Browser profile directory defaults to `data/raw/{retailer}/browser_profile`
+- `_handle_collect` looks up `REGISTRY[args.retailer]` and calls `.collect()`
+
+Keep `collect-amazon` as a hidden alias (for backward compat) that delegates
+to `collect --retailer amazon`.
+
+### 8. `amazon_spending/api.py` (modify)
+
+- Change import: `from .retailers import REGISTRY` (remove `from .collector import collect_amazon`)
+- `_run_sync_job()`: call `REGISTRY["amazon"].collect(...)` — behavior identical
+- `DEFAULT_RAW_OUTDIR` → `PROJECT_ROOT / "data/raw/amazon"` (unchanged, amazon-specific path stays)
+- SQL: all references to `amazon_transactions` → `retailer_transactions`,
+  `amazon_txn_id` → `retailer_txn_id`, `amazon_transaction_id` → `retailer_transaction_id`
+- Path parameter `{amazon_txn_id}` → `{retailer_txn_id}` in all endpoint definitions
+- `_construct_order_url()`: check `retailer` field and build correct URL per retailer
+
+### 9. `amazon_spending/collector.py` (modify — thin shim)
+
+Preserve backward compat for any external scripts that import from `collector`:
+
+```python
+# Backward-compat shim — import from the new location
+from .retailers.amazon import AmazonCollector
+from .retailers.base import CollectResult, ParsedOrder, ParsedItem, ParsedRetailerTransaction as ParsedAmazonTransaction
+
+def collect_amazon(conn, output_dir, **kwargs) -> CollectResult:
+    return AmazonCollector().collect(conn, output_dir, **kwargs)
+```
+
+### 10. `README.md` (update)
+
+- Document `collect --retailer amazon` replacing `collect-amazon`
+- Note backward-compat alias
+- Add section on adding new retailer adapters
+
+---
+
+## What Does NOT Change
+
+- `exporter.py` — queries only `matches`, `transactions`, `order_items`; no retailer-specific tables
+- `matcher.py` — similarly, only references generic tables; verify and leave alone
+- `importers.py` — only touches `transactions` table
+- `webapp.py` — legacy viewer; update SQL if it references `amazon_transactions`
+- Frontend (`frontend/`) — the React UI already uses the API; only needs updates
+  if the API response fields change (they will for `amazon_txn_id` → `retailer_txn_id`)
+- All budget category/subcategory functionality — fully generic already
+
+---
+
+## Frontend Impact
+
+The React types in `frontend/src/types.ts` likely reference `amazon_txn_id`. After
+the API rename to `retailer_txn_id`, those types need updating. This is a separate
+contained change within `types.ts` and `api.ts`.
+
+---
+
+## Migration Safety
+
+- All `ALTER TABLE ... RENAME` operations require SQLite ≥ 3.25 (Python 3.6+ ships ≥ 3.28)
+- Migration is guarded by column/table existence checks — idempotent, safe to run twice
+- Existing data is fully preserved; only names change
+- If a user has no DB yet, the schema creates the new names directly
+
+---
+
+## File Change Summary
+
+| File | Action |
+|------|--------|
+| `retailers/__init__.py` | Create |
+| `retailers/base.py` | Create |
+| `retailers/amazon.py` | Create (move from collector.py) |
+| `retailers/target.py` | Create (stub) |
+| `sql/schema.sql` | Modify (rename tables/cols, add retailer col) |
+| `db.py` | Modify (add migration) |
+| `collector.py` | Modify (thin shim) |
+| `cli.py` | Modify (collect --retailer) |
+| `api.py` | Modify (imports, SQL, path params) |
+| `webapp.py` | Modify (SQL, if any amazon_transactions refs) |
+| `README.md` | Modify |
+| `frontend/src/types.ts` | Modify (retailer_txn_id) |
+| `frontend/src/api.ts` | Modify (retailer_txn_id) |
+| `frontend/src/pages/*.tsx` | Modify (any amazon_txn_id field refs) |
+| `matcher.py` | Verify (likely no changes) |
+| `importers.py` | Verify (likely no changes) |
+| `exporter.py` | No change |
+| `tests/test_sync_logic.py` | Verify/update imports |

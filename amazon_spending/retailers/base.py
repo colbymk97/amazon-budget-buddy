@@ -67,6 +67,16 @@ class ParsedRetailerTransaction:
     source_url: str | None
 
 
+@dataclass
+class LoginResult:
+    """Result of a retailer login attempt."""
+    status: str        # "logged_in" | "login_required" | "timeout" | "cancelled"
+    message: str
+    already_logged_in: bool = False
+    account_label: str | None = None
+    account_key: str | None = None
+
+
 class RetailerCollector(ABC):
     """Abstract base for retailer-specific order scrapers.
 
@@ -75,6 +85,25 @@ class RetailerCollector(ABC):
     """
 
     RETAILER_ID: ClassVar[str]
+
+    def login(
+        self,
+        user_data_dir: Path | None = None,
+        *,
+        check_only: bool = False,
+        timeout_s: int = 300,
+    ) -> LoginResult:
+        """Open a browser for the user to log in to this retailer.
+
+        Args:
+            user_data_dir: Persistent browser profile path (default: retailer-specific).
+            check_only: If True, run headless and only check login state; don't wait.
+            timeout_s: Seconds to wait for manual login before giving up.
+
+        Returns:
+            LoginResult describing the outcome.
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support login command")
 
     @abstractmethod
     def collect(

@@ -6,7 +6,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .db import DEFAULT_DB_PATH, connect, init_db
+from .db import (
+    DEFAULT_DB_PATH,
+    RetailerAccountMismatchError,
+    connect,
+    db_status_payload,
+    ensure_retailer_account,
+    get_retailer_account,
+    init_db,
+    record_retailer_import_run,
+)
 from .exporter import export_reports
 from .importers import import_transactions_csv
 from .retailers import REGISTRY
@@ -34,6 +43,15 @@ examples:
 
   # Use a custom database file
   amazon-spending --db ~/my-data.sqlite3 init-db
+"""
+
+_DB_STATUS_EPILOG = """
+examples:
+  # Show counts, account bindings, and latest import timestamps
+  amazon-spending db-status
+
+  # Read a non-default database
+  amazon-spending --db ~/my-data.sqlite3 db-status
 """
 
 _COLLECT_EPILOG = """
@@ -110,6 +128,51 @@ examples:
 note:
   Requires Streamlit: pip install streamlit
   The new React UI can be launched separately via the API server — see README.
+"""
+
+_LOGIN_EPILOG = """
+examples:
+  # Open a browser window and log in to Amazon interactively
+  amazon-spending login --retailer amazon
+
+  # Check silently whether the stored session is still valid (exit 0 = ok)
+  amazon-spending login --retailer amazon --check
+
+  # Use a custom browser profile location
+  amazon-spending login --retailer amazon --user-data-dir /path/to/profile
+
+notes:
+  - Amazon requires MFA, so login is always interactive (no password flags).
+  - The browser reuses the same persistent Chromium profile as 'collect', so
+    logging in here means future collect runs will not need to prompt.
+  - --check is silent and suitable for scripting: exit 0 = logged in,
+    exit 1 = login required.
+"""
+
+_ACTUAL_SYNC_EPILOG = """
+prerequisites:
+  pip install actualpy                         # or: pip install "amazon-spending[actual]"
+  cp config.example.json data/config.json     # then edit with your Actual credentials
+
+examples:
+  # Preview matches without writing any changes
+  amazon-spending actual-sync --dry-run
+
+  # Sync all unsynced retailer transactions to Actual Budget
+  amazon-spending actual-sync
+
+  # Sync using a custom config file
+  amazon-spending actual-sync --config /path/to/config.json
+
+  # Machine-readable output
+  amazon-spending actual-sync --json
+
+notes:
+  - Only transactions with actual_synced_at IS NULL are processed.
+  - Each transaction is matched by exact amount (±$0) within ±3 days of txn_date.
+  - The first matching Actual transaction has its notes appended with the
+    Amazon order ID and allocated line-items.
+  - Synced transactions are never re-processed.
 """
 
 
@@ -271,6 +334,23 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_INIT_DB_EPILOG,
     )
 
+    sub.add_parser(
+        "db-status",
+        help="Summarize retailer counts, account bindings, and last import times",
+        description=(
+            "Shows a quick database health summary by retailer, including order and\n"
+            "retailer transaction counts, the account bound to this database, and the\n"
+            "most recent recorded import timestamp/status."
+        ),
+        formatter_class=_Formatter,
+        epilog=_DB_STATUS_EPILOG,
+    ).add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
     # ----------------------------------------------------------------- collect
     p_collect = sub.add_parser(
         "collect",
@@ -303,6 +383,59 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_COLLECT_EPILOG,
     )
     _add_collect_args(p_collect_amazon)
+
+    # ------------------------------------------------------------------- login
+    p_login = sub.add_parser(
+        "login",
+        help="Authenticate with a retailer by logging in via a browser window",
+        description=(
+            "Opens a Chromium browser window so you can log in to the retailer\n"
+            "interactively (including MFA). The session is saved in a persistent\n"
+            "browser profile so future 'collect' runs work without prompting.\n"
+            "\n"
+            "Use --check to test silently whether the stored session is still valid."
+        ),
+        formatter_class=_Formatter,
+        epilog=_LOGIN_EPILOG,
+    )
+    p_login.add_argument(
+        "--retailer",
+        required=True,
+        choices=_RETAILER_CHOICES,
+        metavar="NAME",
+        help=f"Retailer to authenticate with: {{{', '.join(_RETAILER_CHOICES)}}}",
+    )
+    p_login.add_argument(
+        "--check",
+        action="store_true",
+        help=(
+            "Check silently whether the stored session is valid (headless). "
+            "Exits 0 if logged in, 1 if login is required."
+        ),
+    )
+    p_login.add_argument(
+        "--user-data-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Persistent browser profile directory "
+            "(default: data/raw/<retailer>/browser_profile)"
+        ),
+    )
+    p_login.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        metavar="SECONDS",
+        help="Seconds to wait for manual login before giving up (default: 300)",
+    )
+    p_login.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print result as a JSON object instead of plain text",
+    )
 
     # ------------------------------------------------------ import-transactions
     p_import = sub.add_parser(
@@ -394,12 +527,67 @@ def build_parser() -> argparse.ArgumentParser:
         help="Port for the viewer server (default: 8501)",
     )
 
+    # ------------------------------------------------------------ actual-sync
+    p_actual = sub.add_parser(
+        "actual-sync",
+        help="Push unsynced retailer transactions to an Actual Budget instance",
+        description=(
+            "Matches each unsynced retailer transaction to an Actual Budget\n"
+            "transaction by exact amount and date (±3 days), then appends the\n"
+            "Amazon order ID and line-items to that transaction's notes field.\n"
+            "\n"
+            "Requires actualpy: pip install actualpy\n"
+            "Requires data/config.json — see config.example.json for the format."
+        ),
+        formatter_class=_Formatter,
+        epilog=_ACTUAL_SYNC_EPILOG,
+    )
+    p_actual.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview matches without writing anything to Actual Budget or the local DB",
+    )
+    p_actual.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Path to config.json (default: data/config.json)",
+    )
+    p_actual.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
     return parser
 
 
 # ---------------------------------------------------------------------------
 # Command handlers
 # ---------------------------------------------------------------------------
+
+def _handle_db_status(args: argparse.Namespace, conn) -> None:
+    payload = db_status_payload(conn)
+
+    if args.output_json:
+        print(json.dumps(payload, indent=2))
+        return
+
+    retailers = payload["retailers"]
+    if not retailers:
+        print("Database is initialized but has no retailer data yet.")
+        return
+
+    for row in retailers:
+        print(f"{row['retailer']}:")
+        print(f"  orders:              {row['orders']}")
+        print(f"  transactions:        {row['transactions']}")
+        print(f"  bound account:       {row['bound_account'] or '-'}")
+        print(f"  last import:         {row['last_import_finished_at'] or '-'}")
+        print(f"  last import status:  {row['last_import_status'] or '-'}")
+
 
 def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
     collector = REGISTRY[retailer_id]
@@ -423,6 +611,16 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         test_run=test_run,
         saved_run_dir=args.saved_run_dir,
         stop_when_before_start_date=args.stop_on_known,
+    )
+
+    bound_account = get_retailer_account(conn, retailer_id)
+    record_retailer_import_run(
+        conn,
+        retailer_id,
+        result.status,
+        result.notes,
+        account_key=bound_account["account_key"] if bound_account else None,
+        account_label=bound_account["account_label"] if bound_account else None,
     )
 
     if args.output_json:
@@ -497,6 +695,48 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         print(f"  item-txn links written: {result.item_txn_links_written}")
 
 
+def _handle_login(args: argparse.Namespace, conn) -> None:
+    collector = REGISTRY[args.retailer]
+    user_data_dir = args.user_data_dir or Path(f"data/raw/{args.retailer}/browser_profile")
+
+    try:
+        result = collector.login(
+            user_data_dir=user_data_dir,
+            check_only=args.check,
+            timeout_s=args.timeout,
+        )
+    except NotImplementedError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if result.status == "logged_in" and result.account_label:
+        try:
+            ensure_retailer_account(
+                conn,
+                args.retailer,
+                result.account_label,
+                account_key=result.account_key,
+                profile_path=str(user_data_dir),
+            )
+        except RetailerAccountMismatchError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    if args.output_json:
+        print(json.dumps({
+            "retailer": args.retailer,
+            "status": result.status,
+            "message": result.message,
+            "already_logged_in": result.already_logged_in,
+            "account_label": result.account_label,
+        }))
+    else:
+        print(result.message)
+
+    if result.status not in ("logged_in",):
+        sys.exit(1)
+
+
 def _handle_import(args: argparse.Namespace, conn) -> None:
     count = import_transactions_csv(conn, args.csv, args.account_id)
 
@@ -519,6 +759,40 @@ def _handle_export(args: argparse.Namespace, conn) -> None:
     for name, path in outputs.items():
         size = path.stat().st_size if path.exists() else 0
         print(f"  {path.name}  ({size} bytes)")
+
+
+def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
+    from .actual_sync import DEFAULT_CONFIG_PATH, load_config, sync_to_actual
+
+    config_path = args.config or DEFAULT_CONFIG_PATH
+    cfg = load_config(config_path)
+    if cfg is None:
+        print(
+            f"Error: Actual Budget is not configured.\n"
+            f"Expected config file: {config_path}\n"
+            f"Copy config.example.json to data/config.json and fill in your credentials.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        result = sync_to_actual(conn, cfg, dry_run=args.dry_run)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_json:
+        print(json.dumps({"dry_run": args.dry_run, **result.to_dict()}, indent=2))
+        return
+
+    mode = " (dry run)" if args.dry_run else ""
+    print(f"Actual Budget sync{mode}: {cfg.base_url} / {cfg.file!r}")
+    print(f"  synced:    {result.synced}")
+    print(f"  no match:  {result.no_match}")
+    if result.errors:
+        print(f"  errors:    {len(result.errors)}")
+        for err in result.errors:
+            print(f"    - {err}")
 
 
 def _handle_view(args: argparse.Namespace, conn) -> None:
@@ -566,6 +840,8 @@ def main() -> None:
 
         if args.command == "init-db":
             print(f"Database initialized at {args.db}")
+        elif args.command == "db-status":
+            _handle_db_status(args, conn)
         elif args.command == "collect":
             _handle_collect(args, conn, args.retailer)
         elif args.command == "collect-amazon":
@@ -577,6 +853,10 @@ def main() -> None:
             _handle_export(args, conn)
         elif args.command == "view":
             _handle_view(args, conn)
+        elif args.command == "actual-sync":
+            _handle_actual_sync(args, conn)
+        elif args.command == "login":
+            _handle_login(args, conn)
         else:
             parser.error(f"Unknown command: {args.command}")
     finally:

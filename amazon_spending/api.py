@@ -896,3 +896,66 @@ def item_transactions(item_id: str):
         return {"rows": _rows_to_dict(rows)}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Actual Budget integration
+# ---------------------------------------------------------------------------
+
+@app.get("/actual/status")
+def actual_status():
+    """Return Actual Budget configuration status and count of pending transactions."""
+    from .actual_sync import load_config
+
+    cfg = load_config()
+    if not cfg:
+        return {"configured": False, "pending": 0}
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS n FROM retailer_transactions
+            WHERE actual_synced_at IS NULL
+              AND txn_date IS NOT NULL
+              AND amount_cents IS NOT NULL
+            """
+        ).fetchone()
+        pending = row["n"] if row else 0
+    finally:
+        conn.close()
+    return {
+        "configured": True,
+        "base_url": cfg.base_url,
+        "file": cfg.file,
+        "account_name": cfg.account_name,
+        "pending": pending,
+    }
+
+
+@app.post("/actual/sync")
+def actual_sync(dry_run: bool = Query(False)):
+    """Push unsynced retailer transactions to Actual Budget.
+
+    Each matched transaction has its notes updated with the Amazon order ID
+    and the line-items allocated to it. Transactions are only synced once;
+    already-synced rows are skipped.
+
+    Pass ``?dry_run=true`` to preview matches without writing any changes.
+    """
+    from .actual_sync import load_config, sync_to_actual
+
+    cfg = load_config()
+    if not cfg:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Actual Budget is not configured. "
+                "Create data/config.json — see config.example.json for the format."
+            ),
+        )
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        result = sync_to_actual(conn, cfg, dry_run=dry_run)
+    finally:
+        conn.close()
+    return {"dry_run": dry_run, **result.to_dict()}

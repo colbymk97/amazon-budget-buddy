@@ -276,7 +276,7 @@ def _selectable_table(rows: list[dict], key: str):
             key=key,
             height=560,
         )
-        selected = event.selection.rows
+        selected = event.selection.rows  # type: ignore[attr-defined]
         if selected:
             return rows[selected[0]]
     except TypeError:

@@ -1,10 +1,25 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 DEFAULT_DB_PATH = Path("data/amazon_spending.sqlite3")
+
+
+@dataclass
+class RetailerStatusSummary:
+    retailer: str
+    order_count: int
+    transaction_count: int
+    last_import_finished_at: str | None
+    last_import_status: str | None
+    bound_account_label: str | None
+
+
+class RetailerAccountMismatchError(RuntimeError):
+    pass
 
 
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -14,6 +29,10 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     return conn
+
+
+def normalize_account_key(value: str) -> str:
+    return " ".join(value.strip().lower().split())
 
 
 def _migrate_to_multi_retailer(conn: sqlite3.Connection) -> None:
@@ -110,6 +129,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             conn.execute(
                 "ALTER TABLE retailer_transactions ADD COLUMN retailer TEXT NOT NULL DEFAULT 'amazon'"
             )
+        if "actual_synced_at" not in txn_cols:
+            conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_synced_at TEXT")
 
     conn.executescript(
         """
@@ -134,6 +155,29 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_budget_subcategories_category_id
             ON budget_subcategories(category_id);
+
+        CREATE TABLE IF NOT EXISTS retailer_accounts (
+            retailer TEXT PRIMARY KEY,
+            account_key TEXT NOT NULL,
+            account_label TEXT NOT NULL,
+            profile_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS retailer_import_runs (
+            run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            retailer TEXT NOT NULL,
+            status TEXT NOT NULL,
+            started_at TEXT NOT NULL DEFAULT (datetime('now')),
+            finished_at TEXT,
+            account_key TEXT,
+            account_label TEXT,
+            notes TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_retailer_import_runs_retailer_finished
+            ON retailer_import_runs(retailer, finished_at DESC);
         """
     )
 
@@ -162,3 +206,172 @@ def init_db(conn: sqlite3.Connection) -> None:
 def executemany(conn: sqlite3.Connection, sql: str, rows: Iterable[tuple]) -> None:
     conn.executemany(sql, rows)
     conn.commit()
+
+
+def get_retailer_account(conn: sqlite3.Connection, retailer: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT retailer, account_key, account_label, profile_path, created_at, updated_at
+        FROM retailer_accounts
+        WHERE retailer = ?
+        """,
+        (retailer,),
+    ).fetchone()
+
+
+def ensure_retailer_account(
+    conn: sqlite3.Connection,
+    retailer: str,
+    account_label: str,
+    *,
+    account_key: str | None = None,
+    profile_path: str | None = None,
+) -> sqlite3.Row:
+    account_label = account_label.strip()
+    if not account_label:
+        raise ValueError("account_label must not be empty")
+
+    effective_key = normalize_account_key(account_key or account_label)
+    existing = get_retailer_account(conn, retailer)
+    if existing and existing["account_key"] != effective_key:
+        raise RetailerAccountMismatchError(
+            f"{retailer} is already bound to account {existing['account_label']!r}, "
+            f"but the current browser session resolved to {account_label!r}. "
+            "Use a different browser profile or a different database."
+        )
+
+    if existing:
+        conn.execute(
+            """
+            UPDATE retailer_accounts
+            SET account_label = ?, profile_path = COALESCE(?, profile_path), updated_at = datetime('now')
+            WHERE retailer = ?
+            """,
+            (account_label, profile_path, retailer),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO retailer_accounts (retailer, account_key, account_label, profile_path)
+            VALUES (?, ?, ?, ?)
+            """,
+            (retailer, effective_key, account_label, profile_path),
+        )
+    conn.commit()
+    row = get_retailer_account(conn, retailer)
+    assert row is not None
+    return row
+
+
+def record_retailer_import_run(
+    conn: sqlite3.Connection,
+    retailer: str,
+    status: str,
+    notes: str,
+    *,
+    account_key: str | None = None,
+    account_label: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO retailer_import_runs (
+            retailer, status, started_at, finished_at, account_key, account_label, notes
+        )
+        VALUES (?, ?, datetime('now'), datetime('now'), ?, ?, ?)
+        """,
+        (retailer, status, account_key, account_label, notes),
+    )
+    conn.commit()
+
+
+def summarize_retailer_status(conn: sqlite3.Connection) -> list[RetailerStatusSummary]:
+    retailers = [
+        row["retailer"]
+        for row in conn.execute(
+            """
+            SELECT retailer FROM orders
+            UNION
+            SELECT retailer FROM retailer_transactions
+            UNION
+            SELECT retailer FROM retailer_accounts
+            UNION
+            SELECT retailer FROM retailer_import_runs
+            ORDER BY retailer
+            """
+        ).fetchall()
+    ]
+
+    summaries: list[RetailerStatusSummary] = []
+    for retailer in retailers:
+        order_count = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE retailer = ?",
+            (retailer,),
+        ).fetchone()[0]
+        transaction_count = conn.execute(
+            "SELECT COUNT(*) FROM retailer_transactions WHERE retailer = ?",
+            (retailer,),
+        ).fetchone()[0]
+        last_run = conn.execute(
+            """
+            SELECT finished_at, status
+            FROM retailer_import_runs
+            WHERE retailer = ?
+            ORDER BY finished_at DESC, run_id DESC
+            LIMIT 1
+            """,
+            (retailer,),
+        ).fetchone()
+        latest_activity = conn.execute(
+            """
+            SELECT MAX(ts) AS ts
+            FROM (
+                SELECT MAX(created_at) AS ts FROM orders WHERE retailer = ?
+                UNION ALL
+                SELECT MAX(updated_at) AS ts FROM orders WHERE retailer = ?
+                UNION ALL
+                SELECT MAX(created_at) AS ts FROM retailer_transactions WHERE retailer = ?
+                UNION ALL
+                SELECT MAX(updated_at) AS ts FROM retailer_transactions WHERE retailer = ?
+            )
+            """,
+            (retailer, retailer, retailer, retailer),
+        ).fetchone()
+        account = get_retailer_account(conn, retailer)
+        summaries.append(
+            RetailerStatusSummary(
+                retailer=retailer,
+                order_count=order_count,
+                transaction_count=transaction_count,
+                last_import_finished_at=(
+                    last_run["finished_at"]
+                    if last_run and last_run["finished_at"]
+                    else latest_activity["ts"] if latest_activity else None
+                ),
+                last_import_status=(
+                    last_run["status"]
+                    if last_run
+                    else "legacy_data"
+                    if (latest_activity and latest_activity["ts"])
+                    else None
+                ),
+                bound_account_label=account["account_label"] if account else None,
+            )
+        )
+    return summaries
+
+
+def db_status_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+    summaries = summarize_retailer_status(conn)
+    return {
+        "retailers": [
+            {
+                "retailer": summary.retailer,
+                "orders": summary.order_count,
+                "transactions": summary.transaction_count,
+                "last_import_finished_at": summary.last_import_finished_at,
+                "last_import_status": summary.last_import_status,
+                "bound_account": summary.bound_account_label,
+            }
+            for summary in summaries
+        ]
+    }
