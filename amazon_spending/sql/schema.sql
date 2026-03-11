@@ -131,6 +131,26 @@ CREATE TABLE IF NOT EXISTS manual_overrides (
     FOREIGN KEY(selected_item_id) REFERENCES order_items(item_id)
 );
 
+CREATE TABLE IF NOT EXISTS retailer_accounts (
+    retailer TEXT PRIMARY KEY,
+    account_key TEXT NOT NULL,
+    account_label TEXT NOT NULL,
+    profile_path TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS retailer_import_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    retailer TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    account_key TEXT,
+    account_label TEXT,
+    notes TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_retailer ON orders(retailer);
 CREATE INDEX IF NOT EXISTS idx_shipments_order_id ON shipments(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
@@ -145,3 +165,4 @@ CREATE INDEX IF NOT EXISTS idx_order_item_transactions_txn ON order_item_transac
 CREATE INDEX IF NOT EXISTS idx_transactions_posted_date ON transactions(posted_date);
 CREATE INDEX IF NOT EXISTS idx_matches_txn_id ON matches(txn_id);
 CREATE INDEX IF NOT EXISTS idx_budget_subcategories_category_id ON budget_subcategories(category_id);
+CREATE INDEX IF NOT EXISTS idx_retailer_import_runs_retailer_finished ON retailer_import_runs(retailer, finished_at DESC);

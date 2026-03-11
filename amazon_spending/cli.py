@@ -6,7 +6,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .db import DEFAULT_DB_PATH, connect, init_db
+from .db import (
+    DEFAULT_DB_PATH,
+    RetailerAccountMismatchError,
+    connect,
+    db_status_payload,
+    ensure_retailer_account,
+    get_retailer_account,
+    init_db,
+    record_retailer_import_run,
+)
 from .exporter import export_reports
 from .importers import import_transactions_csv
 from .retailers import REGISTRY
@@ -34,6 +43,15 @@ examples:
 
   # Use a custom database file
   amazon-spending --db ~/my-data.sqlite3 init-db
+"""
+
+_DB_STATUS_EPILOG = """
+examples:
+  # Show counts, account bindings, and latest import timestamps
+  amazon-spending db-status
+
+  # Read a non-default database
+  amazon-spending --db ~/my-data.sqlite3 db-status
 """
 
 _COLLECT_EPILOG = """
@@ -316,6 +334,23 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=_INIT_DB_EPILOG,
     )
 
+    sub.add_parser(
+        "db-status",
+        help="Summarize retailer counts, account bindings, and last import times",
+        description=(
+            "Shows a quick database health summary by retailer, including order and\n"
+            "retailer transaction counts, the account bound to this database, and the\n"
+            "most recent recorded import timestamp/status."
+        ),
+        formatter_class=_Formatter,
+        epilog=_DB_STATUS_EPILOG,
+    ).add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
     # ----------------------------------------------------------------- collect
     p_collect = sub.add_parser(
         "collect",
@@ -533,6 +568,27 @@ def build_parser() -> argparse.ArgumentParser:
 # Command handlers
 # ---------------------------------------------------------------------------
 
+def _handle_db_status(args: argparse.Namespace, conn) -> None:
+    payload = db_status_payload(conn)
+
+    if args.output_json:
+        print(json.dumps(payload, indent=2))
+        return
+
+    retailers = payload["retailers"]
+    if not retailers:
+        print("Database is initialized but has no retailer data yet.")
+        return
+
+    for row in retailers:
+        print(f"{row['retailer']}:")
+        print(f"  orders:              {row['orders']}")
+        print(f"  transactions:        {row['transactions']}")
+        print(f"  bound account:       {row['bound_account'] or '-'}")
+        print(f"  last import:         {row['last_import_finished_at'] or '-'}")
+        print(f"  last import status:  {row['last_import_status'] or '-'}")
+
+
 def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
     collector = REGISTRY[retailer_id]
 
@@ -555,6 +611,16 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         test_run=test_run,
         saved_run_dir=args.saved_run_dir,
         stop_when_before_start_date=args.stop_on_known,
+    )
+
+    bound_account = get_retailer_account(conn, retailer_id)
+    record_retailer_import_run(
+        conn,
+        retailer_id,
+        result.status,
+        result.notes,
+        account_key=bound_account["account_key"] if bound_account else None,
+        account_label=bound_account["account_label"] if bound_account else None,
     )
 
     if args.output_json:
@@ -629,7 +695,7 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         print(f"  item-txn links written: {result.item_txn_links_written}")
 
 
-def _handle_login(args: argparse.Namespace) -> None:
+def _handle_login(args: argparse.Namespace, conn) -> None:
     collector = REGISTRY[args.retailer]
     user_data_dir = args.user_data_dir or Path(f"data/raw/{args.retailer}/browser_profile")
 
@@ -643,12 +709,26 @@ def _handle_login(args: argparse.Namespace) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    if result.status == "logged_in" and result.account_label:
+        try:
+            ensure_retailer_account(
+                conn,
+                args.retailer,
+                result.account_label,
+                account_key=result.account_key,
+                profile_path=str(user_data_dir),
+            )
+        except RetailerAccountMismatchError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     if args.output_json:
         print(json.dumps({
             "retailer": args.retailer,
             "status": result.status,
             "message": result.message,
             "already_logged_in": result.already_logged_in,
+            "account_label": result.account_label,
         }))
     else:
         print(result.message)
@@ -754,17 +834,14 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    # login does not need a database connection
-    if args.command == "login":
-        _handle_login(args)
-        return
-
     conn = connect(args.db)
     try:
         init_db(conn)
 
         if args.command == "init-db":
             print(f"Database initialized at {args.db}")
+        elif args.command == "db-status":
+            _handle_db_status(args, conn)
         elif args.command == "collect":
             _handle_collect(args, conn, args.retailer)
         elif args.command == "collect-amazon":
@@ -778,6 +855,8 @@ def main() -> None:
             _handle_view(args, conn)
         elif args.command == "actual-sync":
             _handle_actual_sync(args, conn)
+        elif args.command == "login":
+            _handle_login(args, conn)
         else:
             parser.error(f"Unknown command: {args.command}")
     finally:

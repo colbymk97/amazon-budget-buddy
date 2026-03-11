@@ -73,6 +73,8 @@ class LoginResult:
     status: str        # "logged_in" | "login_required" | "timeout" | "cancelled"
     message: str
     already_logged_in: bool = False
+    account_label: str | None = None
+    account_key: str | None = None
 
 
 class RetailerCollector(ABC):
