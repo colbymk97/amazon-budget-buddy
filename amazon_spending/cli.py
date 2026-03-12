@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -116,19 +115,6 @@ examples:
 
   # Export to a custom directory
   amazon-spending export --outdir ~/reports/2024
-"""
-
-_VIEW_EPILOG = """
-examples:
-  # Open the viewer on the default address (http://127.0.0.1:8501)
-  amazon-spending view
-
-  # Expose the viewer on all interfaces
-  amazon-spending view --host 0.0.0.0 --port 8888
-
-note:
-  Requires Streamlit: pip install streamlit
-  The new React UI can be launched separately via the API server — see README.
 """
 
 _LOGIN_EPILOG = """
@@ -303,7 +289,7 @@ def build_parser() -> argparse.ArgumentParser:
             "quick start:\n"
             "  amazon-spending init-db\n"
             "  amazon-spending collect --retailer amazon --order-limit 100\n"
-            "  amazon-spending view\n"
+            "  amazon-spending db-status\n"
         ),
     )
 
@@ -499,33 +485,6 @@ def build_parser() -> argparse.ArgumentParser:
         dest="output_json",
         action="store_true",
         help="Print a JSON summary of output file paths instead of plain text",
-    )
-
-    # -------------------------------------------------------------------- view
-    p_view = sub.add_parser(
-        "view",
-        help="Open the local Streamlit web viewer",
-        description=(
-            "Launches a Streamlit web app for browsing orders, items, and\n"
-            "transactions stored in the local database.\n"
-            "\n"
-            "For the newer React UI, start the API server and frontend separately\n"
-            "(see the README for instructions)."
-        ),
-        formatter_class=_Formatter,
-        epilog=_VIEW_EPILOG,
-    )
-    p_view.add_argument(
-        "--host",
-        type=str,
-        default="127.0.0.1",
-        help="Host address for the viewer server (default: 127.0.0.1)",
-    )
-    p_view.add_argument(
-        "--port",
-        type=int,
-        default=8501,
-        help="Port for the viewer server (default: 8501)",
     )
 
     # ------------------------------------------------------------ actual-sync
@@ -798,37 +757,6 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
             print(f"    - {err}")
 
 
-def _handle_view(args: argparse.Namespace, conn) -> None:
-    try:
-        import streamlit  # noqa: F401
-    except ImportError:
-        print("Streamlit is not installed. Run: pip install streamlit", file=sys.stderr)
-        sys.exit(1)
-
-    app_path = Path(__file__).parent / "webapp.py"
-    cmd = [
-        sys.executable,
-        "-m",
-        "streamlit",
-        "run",
-        str(app_path),
-        "--server.address",
-        args.host,
-        "--server.port",
-        str(args.port),
-        "--",
-        "--db",
-        str(conn.execute("PRAGMA database_list").fetchone()[2]),
-    ]
-    print(f"Starting viewer at http://{args.host}:{args.port}")
-    print("Press Ctrl+C to stop.")
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        print(f"Viewer exited with code {exc.returncode}.", file=sys.stderr)
-        raise
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -854,8 +782,6 @@ def main() -> None:
             _handle_import(args, conn)
         elif args.command == "export":
             _handle_export(args, conn)
-        elif args.command == "view":
-            _handle_view(args, conn)
         elif args.command == "actual-sync":
             _handle_actual_sync(args, conn)
         elif args.command == "login":

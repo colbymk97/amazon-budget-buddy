@@ -25,8 +25,8 @@ amazon-spending init-db
 # 2. Collect your Amazon orders (headless browser, auto-auth fallback)
 amazon-spending collect --retailer amazon --order-limit 100
 
-# 3. Browse orders in the local viewer
-amazon-spending view
+# 3. Check the current DB state
+amazon-spending db-status
 ```
 
 ---
@@ -197,23 +197,6 @@ amazon-spending export [--outdir PATH] [--json]
 amazon-spending export
 amazon-spending export --outdir ~/reports/2024
 ```
-
----
-
-### `view`
-
-Open the local Streamlit web viewer.
-
-```
-amazon-spending view [--host HOST] [--port PORT]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--host HOST` | `127.0.0.1` | Viewer server host |
-| `--port PORT` | `8501` | Viewer server port |
-
-> Requires Streamlit: `pip install streamlit`
 
 ---
 
