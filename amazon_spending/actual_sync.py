@@ -7,19 +7,12 @@ Requires the optional ``actualpy`` package::
 
 Configuration
 -------------
-Create ``data/config.json`` next to the ``data/`` directory (see
-``config.example.json`` at the project root for a template)::
+Store Actual Budget settings in the local SQLite database via the CLI::
 
-    {
-        "actual_budget": {
-            "base_url": "http://localhost:5006",
-            "password": "your-password",
-            "file":     "My Budget",
-            "account_name": null
-        }
-    }
+    amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
 
-``account_name`` is optional.  When set, transaction matching is restricted to
+The CLI prompts for the password if it is not supplied on the command line.
+``account_name`` is optional. When set, transaction matching is restricted to
 that Actual account; when omitted all accounts are searched.
 
 How matching works
@@ -39,14 +32,9 @@ Set ``dry_run=True`` to preview matches without writing anything.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "data" / "config.json"
 
 
 # ---------------------------------------------------------------------------
@@ -61,27 +49,72 @@ class ActualConfig:
     account_name: str | None = None
 
 
-def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ActualConfig | None:
-    """Load Actual Budget settings from *config_path*.
-
-    Returns ``None`` when the file does not exist or the ``actual_budget``
-    section is missing / incomplete.
-    """
-    if not config_path.exists():
-        return None
-    try:
-        raw: dict = json.loads(config_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    ab = raw.get("actual_budget") or {}
-    if not ab.get("base_url") or not ab.get("password") or not ab.get("file"):
+def load_config(conn: sqlite3.Connection) -> ActualConfig | None:
+    """Load Actual Budget settings from the local SQLite database."""
+    row = conn.execute(
+        """
+        SELECT base_url, password, file, account_name
+        FROM actual_budget_config
+        WHERE singleton_id = 1
+        """
+    ).fetchone()
+    if not row:
         return None
     return ActualConfig(
-        base_url=ab["base_url"],
-        password=ab["password"],
-        file=ab["file"],
-        account_name=ab.get("account_name") or None,
+        base_url=row["base_url"],
+        password=row["password"],
+        file=row["file"],
+        account_name=row["account_name"] or None,
     )
+
+
+def save_config(conn: sqlite3.Connection, config: ActualConfig) -> None:
+    conn.execute(
+        """
+        INSERT INTO actual_budget_config (
+            singleton_id, base_url, password, file, account_name, created_at, updated_at
+        )
+        VALUES (1, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(singleton_id) DO UPDATE SET
+            base_url = excluded.base_url,
+            password = excluded.password,
+            file = excluded.file,
+            account_name = excluded.account_name,
+            updated_at = datetime('now')
+        """,
+        (config.base_url, config.password, config.file, config.account_name),
+    )
+    conn.commit()
+
+
+def test_connection(config: ActualConfig) -> None:
+    """Validate Actual Budget connectivity and selected budget/account access."""
+    try:
+        from actual import Actual
+        from actual.queries import get_transactions
+    except ImportError as exc:
+        raise RuntimeError(
+            "actualpy is not installed. Run: pip install actualpy"
+            " (or: pip install \"amazon-spending[actual]\")"
+        ) from exc
+
+    try:
+        with Actual(
+            base_url=config.base_url,
+            password=config.password,
+            file=config.file,
+        ) as actual:
+            if config.account_name:
+                today = date.today()
+                # A narrow no-op query validates that the configured account filter resolves.
+                get_transactions(
+                    actual.session,
+                    start_date=today,
+                    end_date=today + timedelta(days=1),
+                    account=config.account_name,
+                )
+    except Exception as exc:
+        raise RuntimeError(f"Actual Budget connection test failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

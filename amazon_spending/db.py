@@ -178,6 +178,16 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_retailer_import_runs_retailer_finished
             ON retailer_import_runs(retailer, finished_at DESC);
+
+        CREATE TABLE IF NOT EXISTS actual_budget_config (
+            singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+            base_url TEXT NOT NULL,
+            password TEXT NOT NULL,
+            file TEXT NOT NULL,
+            account_name TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         """
     )
 

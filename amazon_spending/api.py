@@ -907,11 +907,11 @@ def actual_status():
     """Return Actual Budget configuration status and count of pending transactions."""
     from .actual_sync import load_config
 
-    cfg = load_config()
-    if not cfg:
-        return {"configured": False, "pending": 0}
     conn = connect(DEFAULT_API_DB_PATH)
     try:
+        cfg = load_config(conn)
+        if not cfg:
+            return {"configured": False, "pending": 0}
         row = conn.execute(
             """
             SELECT COUNT(*) AS n FROM retailer_transactions
@@ -944,17 +944,17 @@ def actual_sync(dry_run: bool = Query(False)):
     """
     from .actual_sync import load_config, sync_to_actual
 
-    cfg = load_config()
-    if not cfg:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Actual Budget is not configured. "
-                "Create data/config.json — see config.example.json for the format."
-            ),
-        )
     conn = connect(DEFAULT_API_DB_PATH)
     try:
+        cfg = load_config(conn)
+        if not cfg:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Actual Budget is not configured. "
+                    "Run the actual-configure CLI command first."
+                ),
+            )
         result = sync_to_actual(conn, cfg, dry_run=dry_run)
     finally:
         conn.close()

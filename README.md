@@ -200,6 +200,56 @@ amazon-spending export --outdir ~/reports/2024
 
 ---
 
+### `actual-configure`
+
+Store Actual Budget settings in the local SQLite database.
+
+```
+amazon-spending actual-configure [options]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--base-url URL` | existing | Actual server base URL |
+| `--password TEXT` | prompt/existing | Actual password |
+| `--file NAME` | existing | Actual budget file name |
+| `--account-name NAME` | existing | Optional Actual account filter |
+| `--clear-account-name` | off | Remove the stored account filter |
+| `--show` | off | Show stored config without revealing the password |
+| `--json` | off | Print results as JSON |
+
+**Examples**
+
+```bash
+amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+amazon-spending actual-configure --account-name "Chase Sapphire"
+amazon-spending actual-configure --show
+```
+
+---
+
+### `actual-sync`
+
+Push unsynced retailer transactions to Actual Budget using the stored config.
+
+```
+amazon-spending actual-sync [--dry-run] [--json]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | off | Preview matches without writing to Actual or the local DB |
+| `--json` | off | Print results as JSON |
+
+**Examples**
+
+```bash
+amazon-spending actual-sync --dry-run
+amazon-spending actual-sync
+```
+
+---
+
 ## React UI + API Server
 
 ```bash

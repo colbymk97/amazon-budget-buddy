@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import sys
 from pathlib import Path
@@ -137,29 +138,44 @@ notes:
 """
 
 _ACTUAL_SYNC_EPILOG = """
-prerequisites:
-  pip install actualpy                         # or: pip install "amazon-spending[actual]"
-  cp config.example.json data/config.json     # then edit with your Actual credentials
-
 examples:
+  # Configure Actual Budget once and store settings in the local DB
+  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+
   # Preview matches without writing any changes
   amazon-spending actual-sync --dry-run
 
   # Sync all unsynced retailer transactions to Actual Budget
   amazon-spending actual-sync
 
-  # Sync using a custom config file
-  amazon-spending actual-sync --config /path/to/config.json
-
   # Machine-readable output
   amazon-spending actual-sync --json
 
 notes:
+  - Configure Actual once with actual-configure; actual-sync reuses that stored config.
   - Only transactions with actual_synced_at IS NULL are processed.
   - Each transaction is matched by exact amount (±$0) within ±3 days of txn_date.
   - The first matching Actual transaction has its notes appended with the
     Amazon order ID and allocated line-items.
   - Synced transactions are never re-processed.
+"""
+
+_ACTUAL_CONFIGURE_EPILOG = """
+examples:
+  # Initial setup (password will be prompted if omitted)
+  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+
+  # Validate the settings before saving them
+  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget" --test-connection
+
+  # Set or change the account filter
+  amazon-spending actual-configure --account-name "Chase Sapphire"
+
+  # Remove the account filter and search all Actual accounts
+  amazon-spending actual-configure --clear-account-name
+
+  # Show the stored configuration without revealing the password
+  amazon-spending actual-configure --show
 """
 
 
@@ -487,6 +503,50 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print a JSON summary of output file paths instead of plain text",
     )
 
+    # ------------------------------------------------------- actual-configure
+    p_actual_config = sub.add_parser(
+        "actual-configure",
+        help="Store Actual Budget connection settings in the local database",
+        description=(
+            "Saves the Actual Budget base URL, password, budget file name, and optional\n"
+            "account filter in the SQLite database so actual-sync can run without a\n"
+            "config file or repeated CLI flags."
+        ),
+        formatter_class=_Formatter,
+        epilog=_ACTUAL_CONFIGURE_EPILOG,
+    )
+    p_actual_config.add_argument("--base-url", type=str, default=None, metavar="URL", help="Actual server base URL")
+    p_actual_config.add_argument("--password", type=str, default=None, metavar="TEXT", help="Actual password")
+    p_actual_config.add_argument("--file", type=str, default=None, metavar="NAME", help="Actual budget file name")
+    p_actual_config.add_argument(
+        "--account-name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Optional Actual account name to restrict matching",
+    )
+    p_actual_config.add_argument(
+        "--clear-account-name",
+        action="store_true",
+        help="Remove any stored Actual account filter",
+    )
+    p_actual_config.add_argument(
+        "--show",
+        action="store_true",
+        help="Show the stored Actual configuration without revealing the password",
+    )
+    p_actual_config.add_argument(
+        "--test-connection",
+        action="store_true",
+        help="Validate the Actual server, budget file, and optional account filter before saving",
+    )
+    p_actual_config.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
     # ------------------------------------------------------------ actual-sync
     p_actual = sub.add_parser(
         "actual-sync",
@@ -497,7 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Amazon order ID and line-items to that transaction's notes field.\n"
             "\n"
             "Requires actualpy: pip install actualpy\n"
-            "Requires data/config.json — see config.example.json for the format."
+            "Requires prior setup via: amazon-spending actual-configure"
         ),
         formatter_class=_Formatter,
         epilog=_ACTUAL_SYNC_EPILOG,
@@ -506,13 +566,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Preview matches without writing anything to Actual Budget or the local DB",
-    )
-    p_actual.add_argument(
-        "--config",
-        type=Path,
-        default=None,
-        metavar="PATH",
-        help="Path to config.json (default: data/config.json)",
     )
     p_actual.add_argument(
         "--json",
@@ -723,16 +776,91 @@ def _handle_export(args: argparse.Namespace, conn) -> None:
         print(f"  {path.name}  ({size} bytes)")
 
 
-def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
-    from .actual_sync import DEFAULT_CONFIG_PATH, load_config, sync_to_actual
+def _actual_config_payload(cfg) -> dict[str, object]:
+    return {
+        "configured": cfg is not None,
+        "base_url": cfg.base_url if cfg else None,
+        "file": cfg.file if cfg else None,
+        "account_name": cfg.account_name if cfg else None,
+        "password_configured": bool(cfg.password) if cfg else False,
+    }
 
-    config_path = args.config or DEFAULT_CONFIG_PATH
-    cfg = load_config(config_path)
+
+def _handle_actual_configure(args: argparse.Namespace, conn) -> None:
+    from .actual_sync import ActualConfig, load_config, save_config, test_connection
+
+    existing = load_config(conn)
+    if args.show:
+        payload = _actual_config_payload(existing)
+        if args.output_json:
+            print(json.dumps(payload, indent=2))
+        elif not payload["configured"]:
+            print("Actual Budget is not configured.")
+        else:
+            print("Actual Budget configuration:")
+            print(f"  base_url:            {payload['base_url']}")
+            print(f"  file:                {payload['file']}")
+            print(f"  account_name:        {payload['account_name'] or '-'}")
+            print(f"  password_configured: {'yes' if payload['password_configured'] else 'no'}")
+        return
+
+    base_url = args.base_url or (existing.base_url if existing else None)
+    file_name = args.file or (existing.file if existing else None)
+    password = args.password or (existing.password if existing else None)
+    if password is None:
+        password = getpass.getpass("Actual Budget password: ").strip()
+    account_name = existing.account_name if existing else None
+    if args.clear_account_name:
+        account_name = None
+    elif args.account_name is not None:
+        account_name = args.account_name.strip() or None
+
+    if not base_url or not file_name or not password:
+        print(
+            "Error: Actual Budget configuration requires base_url, file, and password. "
+            "Provide them on the first run of actual-configure.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    cfg = ActualConfig(
+        base_url=base_url.strip(),
+        password=password,
+        file=file_name.strip(),
+        account_name=account_name,
+    )
+
+    if args.test_connection:
+        try:
+            test_connection(cfg)
+        except RuntimeError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    save_config(conn, cfg)
+    payload = _actual_config_payload(cfg)
+
+    if args.output_json:
+        print(json.dumps({**payload, "connection_tested": args.test_connection}, indent=2))
+        return
+
+    print("Actual Budget configuration saved.")
+    print(f"  base_url:            {payload['base_url']}")
+    print(f"  file:                {payload['file']}")
+    print(f"  account_name:        {payload['account_name'] or '-'}")
+    print(f"  password_configured: {'yes' if payload['password_configured'] else 'no'}")
+    if args.test_connection:
+        print("  connection_tested:   yes")
+
+
+def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
+    from .actual_sync import load_config, sync_to_actual
+
+    cfg = load_config(conn)
     if cfg is None:
         print(
-            f"Error: Actual Budget is not configured.\n"
-            f"Expected config file: {config_path}\n"
-            f"Copy config.example.json to data/config.json and fill in your credentials.",
+            "Error: Actual Budget is not configured.\n"
+            "Run: amazon-spending actual-configure --base-url <url> --file <budget>",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -782,6 +910,8 @@ def main() -> None:
             _handle_import(args, conn)
         elif args.command == "export":
             _handle_export(args, conn)
+        elif args.command == "actual-configure":
+            _handle_actual_configure(args, conn)
         elif args.command == "actual-sync":
             _handle_actual_sync(args, conn)
         elif args.command == "login":
