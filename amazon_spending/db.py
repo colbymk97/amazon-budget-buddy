@@ -13,6 +13,8 @@ class RetailerStatusSummary:
     retailer: str
     order_count: int
     transaction_count: int
+    first_order_date: str | None
+    latest_order_date: str | None
     last_import_finished_at: str | None
     last_import_status: str | None
     bound_account_label: str | None
@@ -365,12 +367,18 @@ def summarize_retailer_status(conn: sqlite3.Connection) -> list[RetailerStatusSu
             """,
             (retailer, retailer, retailer, retailer),
         ).fetchone()
+        order_date_range = conn.execute(
+            "SELECT MIN(order_date), MAX(order_date) FROM orders WHERE retailer = ?",
+            (retailer,),
+        ).fetchone()
         account = get_retailer_account(conn, retailer)
         summaries.append(
             RetailerStatusSummary(
                 retailer=retailer,
                 order_count=order_count,
                 transaction_count=transaction_count,
+                first_order_date=order_date_range[0] if order_date_range else None,
+                latest_order_date=order_date_range[1] if order_date_range else None,
                 last_import_finished_at=(
                     last_run["finished_at"]
                     if last_run and last_run["finished_at"]
@@ -397,6 +405,8 @@ def db_status_payload(conn: sqlite3.Connection) -> dict[str, Any]:
                 "retailer": summary.retailer,
                 "orders": summary.order_count,
                 "transactions": summary.transaction_count,
+                "first_order_date": summary.first_order_date,
+                "latest_order_date": summary.latest_order_date,
                 "last_import_finished_at": summary.last_import_finished_at,
                 "last_import_status": summary.last_import_status,
                 "bound_account": summary.bound_account_label,

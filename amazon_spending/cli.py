@@ -160,6 +160,43 @@ notes:
   - Synced transactions are never re-processed.
 """
 
+_AUDIT_EPILOG = """
+modes:
+  full    Scan from today back to the oldest locally-imported order date.
+          Finds every order that exists on Amazon in that window but is
+          absent from the local database.  Alias: from-first-transaction
+
+  latest  Scan from today until the first locally-known order is encountered.
+          Finds orders that appeared after the most recent collect run.
+          Alias: from-latest-transaction
+
+examples:
+  # Full audit — compare all Amazon history against local DB
+  amazon-spending audit --retailer amazon --mode full
+
+  # Same via alias
+  amazon-spending from-first-transaction --retailer amazon
+
+  # Latest audit — check for new orders since last collect
+  amazon-spending audit --retailer amazon --mode latest
+  amazon-spending from-latest-transaction --retailer amazon
+
+  # Force a visible browser window (useful if session needs re-auth)
+  amazon-spending audit --retailer amazon --mode full --headed
+
+  # Machine-readable output
+  amazon-spending audit --retailer amazon --mode latest --json
+
+notes:
+  - Only listing pages are fetched.  No order detail or payment pages are
+    opened, so the audit is fast and leaves the database unchanged.
+  - Full audit stops after 3 consecutive orders older than the anchor date.
+  - Latest audit stops the moment any locally-known order ID appears on a
+    listing page.
+  - Missing orders are reported but NOT automatically imported.  Run
+    'collect' with appropriate --start-date / --end-date to pull them in.
+"""
+
 _ACTUAL_CONFIGURE_EPILOG = """
 examples:
   # Initial setup (password will be prompted if omitted)
@@ -440,6 +477,78 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print result as a JSON object instead of plain text",
     )
 
+    # -------------------------------------------------------------------- audit
+    def _add_audit_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--retailer",
+            default="amazon",
+            choices=_RETAILER_CHOICES,
+            metavar="NAME",
+            help=f"Retailer to audit (default: amazon): {{{', '.join(_RETAILER_CHOICES)}}}",
+        )
+        p.add_argument(
+            "--headed",
+            action="store_true",
+            help="Force a visible browser window (default: headless)",
+        )
+        p.add_argument(
+            "--user-data-dir",
+            type=Path,
+            default=None,
+            metavar="PATH",
+            help="Persistent browser profile directory (default: data/raw/<retailer>/browser_profile)",
+        )
+        p.add_argument(
+            "--json",
+            dest="output_json",
+            action="store_true",
+            help="Print results as a JSON object instead of plain text",
+        )
+
+    p_audit = sub.add_parser(
+        "audit",
+        help="Compare Amazon order history against the local database",
+        description=(
+            "Scans Amazon order listing pages and compares the results against the\n"
+            "local database, reporting any orders present on Amazon that have not\n"
+            "been imported locally.  Only listing pages are fetched — the audit is\n"
+            "fast and makes no changes to the database.\n"
+            "\n"
+            "Two modes:\n"
+            "  full    Scan from today back to the oldest locally-imported order.\n"
+            "  latest  Scan from today until the most-recent local order is found."
+        ),
+        formatter_class=_Formatter,
+        epilog=_AUDIT_EPILOG,
+    )
+    p_audit.add_argument(
+        "--mode",
+        required=True,
+        choices=["full", "latest"],
+        help="'full' (from first transaction) or 'latest' (from last transaction)",
+    )
+    _add_audit_args(p_audit)
+
+    # Alias: from-first-transaction → audit --mode full
+    p_from_first = sub.add_parser(
+        "from-first-transaction",
+        help="[alias] Full audit: scan Amazon from today back to the oldest local order",
+        description="Alias for: audit --mode full\n\nFinds every order on Amazon since your oldest imported order that is missing from the local database.",
+        formatter_class=_Formatter,
+        epilog=_AUDIT_EPILOG,
+    )
+    _add_audit_args(p_from_first)
+
+    # Alias: from-latest-transaction → audit --mode latest
+    p_from_latest = sub.add_parser(
+        "from-latest-transaction",
+        help="[alias] Latest audit: scan Amazon for new orders since the last import",
+        description="Alias for: audit --mode latest\n\nFinds orders that appeared on Amazon after your most recent collect run.",
+        formatter_class=_Formatter,
+        epilog=_AUDIT_EPILOG,
+    )
+    _add_audit_args(p_from_latest)
+
     # ------------------------------------------------------ import-transactions
     p_import = sub.add_parser(
         "import-transactions",
@@ -597,6 +706,8 @@ def _handle_db_status(args: argparse.Namespace, conn) -> None:
         print(f"{row['retailer']}:")
         print(f"  orders:              {row['orders']}")
         print(f"  transactions:        {row['transactions']}")
+        print(f"  first order date:    {row['first_order_date'] or '-'}")
+        print(f"  latest order date:   {row['latest_order_date'] or '-'}")
         print(f"  bound account:       {row['bound_account'] or '-'}")
         print(f"  last import:         {row['last_import_finished_at'] or '-'}")
         print(f"  last import status:  {row['last_import_status'] or '-'}")
@@ -853,17 +964,121 @@ def _handle_actual_configure(args: argparse.Namespace, conn) -> None:
         print("  connection_tested:   yes")
 
 
+def _handle_audit(args: argparse.Namespace, conn, mode: str) -> None:
+    from .audit import audit_amazon
+
+    retailer_id = getattr(args, "retailer", "amazon")
+    outdir = Path(f"data/raw/{retailer_id}")
+    user_data_dir = args.user_data_dir or Path(f"data/raw/{retailer_id}/browser_profile")
+
+    result = audit_amazon(
+        conn=conn,
+        mode=mode,
+        output_dir=outdir,
+        headless=not args.headed,
+        user_data_dir=user_data_dir,
+    )
+
+    if args.output_json:
+        print(json.dumps(result.to_dict(), indent=2))
+        if result.status not in ("ok",):
+            sys.exit(1)
+        return
+
+    mode_label = "Full Audit (from first transaction)" if mode == "full" else "Latest Audit (since last import)"
+    print(f"Amazon {mode_label}")
+    print(f"  anchor date:    {result.anchor_date or '-'}")
+    print(f"  status:         {result.status}")
+    if result.status != "ok":
+        print(f"  {result.notes}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  pages scanned:  {result.pages_scanned}")
+    print(f"  Amazon orders:  {result.amazon_orders_in_scope}")
+    print(f"  local DB orders:{result.db_orders_in_scope}")
+    print(f"  missing:        {len(result.missing_orders)}")
+    print()
+
+    if result.missing_orders:
+        print("Orders on Amazon not in local database:")
+        for m in result.missing_orders:
+            date_str = m.order_date or "unknown date"
+            print(f"  {m.order_id}  {date_str}")
+        print()
+        if result.missing_orders:
+            dates = [m.order_date for m in result.missing_orders if m.order_date]
+            if dates:
+                min_date = min(dates)
+                max_date = max(dates)
+                print(
+                    f"To import missing orders, run:\n"
+                    f"  amazon-spending collect --retailer {retailer_id}"
+                    f" --start-date {min_date} --end-date {max_date}"
+                )
+    else:
+        print(result.notes)
+
+
+def _run_actual_setup_wizard(conn) -> "ActualConfig":
+    """Interactive first-time setup wizard for Actual Budget. Returns a saved, tested config."""
+    from .actual_sync import ActualConfig, save_config, test_connection
+
+    print("Actual Budget is not configured yet. Let's set it up now.")
+    print()
+
+    base_url = input("  Server URL (e.g. http://localhost:5006): ").strip()
+    if not base_url:
+        print("Error: server URL is required.", file=sys.stderr)
+        sys.exit(1)
+
+    file_name = input("  Budget file name: ").strip()
+    if not file_name:
+        print("Error: budget file name is required.", file=sys.stderr)
+        sys.exit(1)
+
+    password = getpass.getpass("  Password: ").strip()
+    if not password:
+        print("Error: password is required.", file=sys.stderr)
+        sys.exit(1)
+
+    account_name_raw = input("  Account name to restrict matching (leave blank for all accounts): ").strip()
+    account_name = account_name_raw or None
+
+    cfg = ActualConfig(
+        base_url=base_url,
+        password=password,
+        file=file_name,
+        account_name=account_name,
+    )
+
+    print()
+    print("Testing connection...", end=" ", flush=True)
+    try:
+        test_connection(cfg)
+    except RuntimeError as exc:
+        print("failed.")
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print("OK")
+    save_config(conn, cfg)
+    print("Configuration saved. Proceeding with sync.")
+    print()
+    return cfg
+
+
 def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
     from .actual_sync import load_config, sync_to_actual
 
     cfg = load_config(conn)
     if cfg is None:
-        print(
-            "Error: Actual Budget is not configured.\n"
-            "Run: amazon-spending actual-configure --base-url <url> --file <budget>",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        if args.output_json:
+            print(
+                '{"error": "Actual Budget is not configured. Run: amazon-spending actual-configure --base-url <url> --file <budget>"}',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cfg = _run_actual_setup_wizard(conn)
 
     try:
         result = sync_to_actual(conn, cfg, dry_run=args.dry_run)
@@ -916,6 +1131,12 @@ def main() -> None:
             _handle_actual_sync(args, conn)
         elif args.command == "login":
             _handle_login(args, conn)
+        elif args.command == "audit":
+            _handle_audit(args, conn, args.mode)
+        elif args.command == "from-first-transaction":
+            _handle_audit(args, conn, "full")
+        elif args.command == "from-latest-transaction":
+            _handle_audit(args, conn, "latest")
         else:
             parser.error(f"Unknown command: {args.command}")
     finally:

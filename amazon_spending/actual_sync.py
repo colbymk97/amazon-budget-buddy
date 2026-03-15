@@ -20,7 +20,7 @@ How matching works
 For each retailer transaction that has not yet been synced:
 
 1.  Its ``amount_cents`` is converted to Actual milliunits
-    (``milliunits = -(amount_cents * 10)``; purchases are negative outflows).
+    (``milliunits = amount_cents * 10``; amount_cents is already negative for purchases).
 2.  Actual transactions within ±3 days of the retailer ``txn_date`` that
     carry the exact milliunit amount are fetched.
 3.  The first match has its ``notes`` field updated with the Amazon order ID
@@ -237,8 +237,9 @@ def sync_to_actual(
             note = _build_note(order_id, items)
 
             # Actual Budget stores amounts as milliunits (1 000 = $1.00).
-            # Purchases are negative outflows: $42.99 → -42 990.
-            actual_amount = -(amount_cents * 10)
+            # retailer_transactions.amount_cents is already negative for purchases
+            # (e.g. -4299 for a $42.99 charge), so just scale to milliunits.
+            actual_amount = amount_cents * 10
 
             window_start = txn_date - timedelta(days=3)
             window_end = txn_date + timedelta(days=3)

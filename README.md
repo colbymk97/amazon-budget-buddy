@@ -7,12 +7,51 @@ All data stays on your machine — no cloud services required.
 
 ## Installation
 
+### Install into a virtual environment (recommended)
+
+This registers the `amazon-spending` command so you can run it from anywhere
+while the venv is active. Run these from the repo root:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python3 -m ensurepip --upgrade     # bootstrap pip as a module
+pip install --upgrade pip          # upgrade pip to support pyproject.toml installs
 pip install -e .
 playwright install chromium
 ```
+
+> **Note:** The `ensurepip` and `pip upgrade` steps are required on macOS with
+> the python.org Python 3.9 installer. Skipping them causes a
+> `No module named pip` error during install.
+
+The `amazon-spending` command is now available whenever the venv is active:
+
+```bash
+amazon-spending --version
+amazon-spending init-db
+```
+
+To activate the venv in a new terminal session:
+
+```bash
+source .venv/bin/activate
+```
+
+### Run without installing (using the module directly)
+
+You can also invoke the package directly as a Python module from the repo root
+without registering the `amazon-spending` entry-point:
+
+```bash
+source .venv/bin/activate
+python3 -m amazon_spending init-db
+python3 -m amazon_spending collect --retailer amazon --order-limit 50
+python3 -m amazon_spending db-status
+```
+
+All commands and flags are identical — `python3 -m amazon_spending` is a
+drop-in equivalent to `amazon-spending`.
 
 ---
 

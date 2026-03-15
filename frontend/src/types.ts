@@ -32,8 +32,6 @@ export type RetailerTransaction = {
   budget_subcategory_name?: string | null;
 };
 
-/** @deprecated Use RetailerTransaction */
-export type AmazonTransaction = RetailerTransaction & { amazon_txn_id?: string };
 
 export type OrderItem = {
   item_id: string;
