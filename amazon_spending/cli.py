@@ -677,6 +677,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Preview matches without writing anything to Actual Budget or the local DB",
     )
     p_actual.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print each synced and missed transaction",
+    )
+    p_actual.add_argument(
         "--json",
         dest="output_json",
         action="store_true",
@@ -1098,6 +1103,17 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
         print(f"  errors:    {len(result.errors)}")
         for err in result.errors:
             print(f"    - {err}")
+
+    verbose = getattr(args, "verbose", False)
+    if verbose:
+        if result.synced_rows:
+            print(f"\nSynced ({result.synced}):")
+            for r in result.synced_rows:
+                print(f"  {r.txn_date}  ${abs(r.amount_cents)/100:>8.2f}  {r.order_id}  [{r.retailer_txn_id}]")
+        if result.missed_rows:
+            print(f"\nNo match ({result.no_match}):")
+            for r in result.missed_rows:
+                print(f"  {r.txn_date}  ${abs(r.amount_cents)/100:>8.2f}  {r.order_id}  [{r.retailer_txn_id}]")
 
 
 # ---------------------------------------------------------------------------
