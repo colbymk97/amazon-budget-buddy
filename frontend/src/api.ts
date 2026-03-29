@@ -118,6 +118,19 @@ export async function cancelSync() {
   return res.json() as Promise<{ cancelled: boolean; message: string }>;
 }
 
+export async function assignTransactionBudget(
+  txnId: string,
+  payload: { budget_category_id: number | null; budget_subcategory_id: number | null }
+) {
+  const res = await fetch(`${API_BASE}/transactions/${txnId}/budget`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json() as Promise<RetailerTransaction>;
+}
+
 export function listBudgetCategories() {
   return getJson<RowsResponse<BudgetCategory>>(`/budget/categories`);
 }

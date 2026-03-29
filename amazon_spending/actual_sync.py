@@ -7,27 +7,21 @@ Requires the optional ``actualpy`` package::
 
 Configuration
 -------------
-Create ``data/config.json`` next to the ``data/`` directory (see
-``config.example.json`` at the project root for a template)::
+Store Actual Budget settings in the local SQLite database via the CLI::
 
-    {
-        "actual_budget": {
-            "base_url": "http://localhost:5006",
-            "password": "your-password",
-            "file":     "My Budget",
-            "account_name": null
-        }
-    }
+    amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
 
-``account_name`` is optional.  When set, transaction matching is restricted to
+The CLI prompts for the password if it is not supplied on the command line.
+``account_name`` is optional. When set, transaction matching is restricted to
 that Actual account; when omitted all accounts are searched.
 
 How matching works
 ------------------
 For each retailer transaction that has not yet been synced:
 
-1.  Its ``amount_cents`` is converted to Actual milliunits
-    (``milliunits = -(amount_cents * 10)``; purchases are negative outflows).
+1.  Its ``amount_cents`` (already negative for purchases, e.g. -4299 for $42.99)
+    is compared directly against ``t.amount`` from actualpy, which uses the same
+    cent scale.
 2.  Actual transactions within ±3 days of the retailer ``txn_date`` that
     carry the exact milliunit amount are fetched.
 3.  The first match has its ``notes`` field updated with the Amazon order ID
@@ -39,14 +33,9 @@ Set ``dry_run=True`` to preview matches without writing anything.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from pathlib import Path
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "data" / "config.json"
 
 
 # ---------------------------------------------------------------------------
@@ -61,27 +50,72 @@ class ActualConfig:
     account_name: str | None = None
 
 
-def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> ActualConfig | None:
-    """Load Actual Budget settings from *config_path*.
-
-    Returns ``None`` when the file does not exist or the ``actual_budget``
-    section is missing / incomplete.
-    """
-    if not config_path.exists():
-        return None
-    try:
-        raw: dict = json.loads(config_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    ab = raw.get("actual_budget") or {}
-    if not ab.get("base_url") or not ab.get("password") or not ab.get("file"):
+def load_config(conn: sqlite3.Connection) -> ActualConfig | None:
+    """Load Actual Budget settings from the local SQLite database."""
+    row = conn.execute(
+        """
+        SELECT base_url, password, file, account_name
+        FROM actual_budget_config
+        WHERE singleton_id = 1
+        """
+    ).fetchone()
+    if not row:
         return None
     return ActualConfig(
-        base_url=ab["base_url"],
-        password=ab["password"],
-        file=ab["file"],
-        account_name=ab.get("account_name") or None,
+        base_url=row["base_url"],
+        password=row["password"],
+        file=row["file"],
+        account_name=row["account_name"] or None,
     )
+
+
+def save_config(conn: sqlite3.Connection, config: ActualConfig) -> None:
+    conn.execute(
+        """
+        INSERT INTO actual_budget_config (
+            singleton_id, base_url, password, file, account_name, created_at, updated_at
+        )
+        VALUES (1, ?, ?, ?, ?, datetime('now'), datetime('now'))
+        ON CONFLICT(singleton_id) DO UPDATE SET
+            base_url = excluded.base_url,
+            password = excluded.password,
+            file = excluded.file,
+            account_name = excluded.account_name,
+            updated_at = datetime('now')
+        """,
+        (config.base_url, config.password, config.file, config.account_name),
+    )
+    conn.commit()
+
+
+def test_connection(config: ActualConfig) -> None:
+    """Validate Actual Budget connectivity and selected budget/account access."""
+    try:
+        from actual import Actual
+        from actual.queries import get_transactions
+    except ImportError as exc:
+        raise RuntimeError(
+            "actualpy is not installed. Run: pip install actualpy"
+            " (or: pip install \"amazon-spending[actual]\")"
+        ) from exc
+
+    try:
+        with Actual(
+            base_url=config.base_url,
+            password=config.password,
+            file=config.file,
+        ) as actual:
+            if config.account_name:
+                today = date.today()
+                # A narrow no-op query validates that the configured account filter resolves.
+                get_transactions(
+                    actual.session,
+                    start_date=today,
+                    end_date=today + timedelta(days=1),
+                    account=config.account_name,
+                )
+    except Exception as exc:
+        raise RuntimeError(f"Actual Budget connection test failed: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -114,16 +148,44 @@ def _build_note(order_id: str, items: list) -> str:
 # ---------------------------------------------------------------------------
 
 @dataclass
+class SyncedRow:
+    retailer_txn_id: str
+    order_id: str
+    txn_date: str
+    amount_cents: int
+
+
+@dataclass
+class MissedRow:
+    retailer_txn_id: str
+    order_id: str
+    txn_date: str
+    amount_cents: int
+
+
+@dataclass
 class SyncResult:
     synced: int = 0
     no_match: int = 0
     errors: list[str] = field(default_factory=list)
+    synced_rows: list[SyncedRow] = field(default_factory=list)
+    missed_rows: list[MissedRow] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "synced": self.synced,
             "no_match": self.no_match,
             "errors": self.errors,
+            "synced_rows": [
+                {"retailer_txn_id": r.retailer_txn_id, "order_id": r.order_id,
+                 "txn_date": r.txn_date, "amount_cents": r.amount_cents}
+                for r in self.synced_rows
+            ],
+            "missed_rows": [
+                {"retailer_txn_id": r.retailer_txn_id, "order_id": r.order_id,
+                 "txn_date": r.txn_date, "amount_cents": r.amount_cents}
+                for r in self.missed_rows
+            ],
         }
 
 
@@ -203,9 +265,10 @@ def sync_to_actual(
 
             note = _build_note(order_id, items)
 
-            # Actual Budget stores amounts as milliunits (1 000 = $1.00).
-            # Purchases are negative outflows: $42.99 → -42 990.
-            actual_amount = -(amount_cents * 10)
+            # retailer_transactions.amount_cents is already negative for purchases
+            # (e.g. -4299 for a $42.99 charge). actualpy returns t.amount in the
+            # same cent scale, so compare directly.
+            actual_amount = amount_cents
 
             window_start = txn_date - timedelta(days=3)
             window_end = txn_date + timedelta(days=3)
@@ -228,6 +291,12 @@ def sync_to_actual(
 
             if not matches:
                 result.no_match += 1
+                result.missed_rows.append(MissedRow(
+                    retailer_txn_id=txn_id,
+                    order_id=order_id,
+                    txn_date=str(txn_date),
+                    amount_cents=amount_cents,
+                ))
                 continue
 
             best = matches[0]
@@ -247,6 +316,12 @@ def sync_to_actual(
                 db_conn.commit()
 
             result.synced += 1
+            result.synced_rows.append(SyncedRow(
+                retailer_txn_id=txn_id,
+                order_id=order_id,
+                txn_date=str(txn_date),
+                amount_cents=amount_cents,
+            ))
 
         if not dry_run and result.synced > 0:
             actual.commit()

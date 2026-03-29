@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { formatMoney, listItems, listOrders, listTransactions } from "../api";
-import type { AmazonTransaction, Order, OrderItem } from "../types";
+import type { RetailerTransaction, Order, OrderItem } from "../types";
 
 function monthStart(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
@@ -33,7 +33,7 @@ export function ReportsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [orders, setOrders] = useState<Order[]>([]);
-  const [txns, setTxns] = useState<AmazonTransaction[]>([]);
+  const [txns, setTxns] = useState<RetailerTransaction[]>([]);
   const [items, setItems] = useState<OrderItem[]>([]);
 
   const startDate = useMemo(() => isoDate(monthStart(selectedMonth)), [selectedMonth]);

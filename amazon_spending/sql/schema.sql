@@ -151,6 +151,16 @@ CREATE TABLE IF NOT EXISTS retailer_import_runs (
     notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS actual_budget_config (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    base_url TEXT NOT NULL,
+    password TEXT NOT NULL,
+    file TEXT NOT NULL,
+    account_name TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_orders_retailer ON orders(retailer);
 CREATE INDEX IF NOT EXISTS idx_shipments_order_id ON shipments(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);

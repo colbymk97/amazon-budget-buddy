@@ -7,12 +7,51 @@ All data stays on your machine — no cloud services required.
 
 ## Installation
 
+### Install into a virtual environment (recommended)
+
+This registers the `amazon-spending` command so you can run it from anywhere
+while the venv is active. Run these from the repo root:
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python3 -m ensurepip --upgrade     # bootstrap pip as a module
+pip install --upgrade pip          # upgrade pip to support pyproject.toml installs
 pip install -e .
 playwright install chromium
 ```
+
+> **Note:** The `ensurepip` and `pip upgrade` steps are required on macOS with
+> the python.org Python 3.9 installer. Skipping them causes a
+> `No module named pip` error during install.
+
+The `amazon-spending` command is now available whenever the venv is active:
+
+```bash
+amazon-spending --version
+amazon-spending init-db
+```
+
+To activate the venv in a new terminal session:
+
+```bash
+source .venv/bin/activate
+```
+
+### Run without installing (using the module directly)
+
+You can also invoke the package directly as a Python module from the repo root
+without registering the `amazon-spending` entry-point:
+
+```bash
+source .venv/bin/activate
+python3 -m amazon_spending init-db
+python3 -m amazon_spending collect --retailer amazon --order-limit 50
+python3 -m amazon_spending db-status
+```
+
+All commands and flags are identical — `python3 -m amazon_spending` is a
+drop-in equivalent to `amazon-spending`.
 
 ---
 
@@ -25,8 +64,8 @@ amazon-spending init-db
 # 2. Collect your Amazon orders (headless browser, auto-auth fallback)
 amazon-spending collect --retailer amazon --order-limit 100
 
-# 3. Browse orders in the local viewer
-amazon-spending view
+# 3. Check the current DB state
+amazon-spending db-status
 ```
 
 ---
@@ -200,20 +239,53 @@ amazon-spending export --outdir ~/reports/2024
 
 ---
 
-### `view`
+### `actual-configure`
 
-Open the local Streamlit web viewer.
+Store Actual Budget settings in the local SQLite database.
 
 ```
-amazon-spending view [--host HOST] [--port PORT]
+amazon-spending actual-configure [options]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--host HOST` | `127.0.0.1` | Viewer server host |
-| `--port PORT` | `8501` | Viewer server port |
+| `--base-url URL` | existing | Actual server base URL |
+| `--password TEXT` | prompt/existing | Actual password |
+| `--file NAME` | existing | Actual budget file name |
+| `--account-name NAME` | existing | Optional Actual account filter |
+| `--clear-account-name` | off | Remove the stored account filter |
+| `--show` | off | Show stored config without revealing the password |
+| `--json` | off | Print results as JSON |
 
-> Requires Streamlit: `pip install streamlit`
+**Examples**
+
+```bash
+amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+amazon-spending actual-configure --account-name "Chase Sapphire"
+amazon-spending actual-configure --show
+```
+
+---
+
+### `actual-sync`
+
+Push unsynced retailer transactions to Actual Budget using the stored config.
+
+```
+amazon-spending actual-sync [--dry-run] [--json]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--dry-run` | off | Preview matches without writing to Actual or the local DB |
+| `--json` | off | Print results as JSON |
+
+**Examples**
+
+```bash
+amazon-spending actual-sync --dry-run
+amazon-spending actual-sync
+```
 
 ---
 
