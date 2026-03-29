@@ -15,6 +15,9 @@ reports/
 .run_logs/
 *.log
 
+# Claude Code local memory
+.claude/
+
 # macOS
 .DS_Store
 
