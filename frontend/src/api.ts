@@ -1,4 +1,4 @@
-import type { RetailerTransaction, BudgetCategory, BudgetSubcategory, Order, OrderItem } from "./types";
+import type { RetailerTransaction, BudgetCategory, BudgetSubcategory, Order, OrderItem, ActualStatus, ActualCategory, ActualConfigPayload } from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -162,4 +162,67 @@ export async function createBudgetSubcategory(payload: {
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json() as Promise<BudgetSubcategory>;
+}
+
+// ---------------------------------------------------------------------------
+// Actual Budget
+// ---------------------------------------------------------------------------
+
+export function getActualStatus() {
+  return getJson<ActualStatus>(`/actual/status`);
+}
+
+export async function saveActualConfig(payload: ActualConfigPayload) {
+  const res = await fetch(`${API_BASE}/actual/configure`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ configured: boolean; base_url: string; file: string; account_name?: string | null }>;
+}
+
+export async function testActualConnection(payload: ActualConfigPayload) {
+  const res = await fetch(`${API_BASE}/actual/test-connection`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ success: boolean; message: string }>;
+}
+
+export function getActualCategories() {
+  return getJson<{ rows: ActualCategory[] }>(`/actual/categories`);
+}
+
+export async function syncToActual(dryRun = false) {
+  const res = await fetch(`${API_BASE}/actual/sync?dry_run=${dryRun}`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{
+    dry_run: boolean;
+    synced: number;
+    no_match: number;
+    errors: string[];
+    synced_rows: { retailer_txn_id: string; order_id: string; txn_date: string; amount_cents: number }[];
+    missed_rows: { retailer_txn_id: string; order_id: string; txn_date: string; amount_cents: number }[];
+  }>;
+}
+
+export async function autoCategorize() {
+  const res = await fetch(`${API_BASE}/actual/auto-categorize`, { method: "POST" });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ categorized: number; total: number; message?: string }>;
 }

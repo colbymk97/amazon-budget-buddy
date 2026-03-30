@@ -1,16 +1,21 @@
 import { useEffect, useMemo, useState } from "react";
-import { cancelSync, getHealth, getSyncStatus, startSync, type SyncStatus } from "../api";
+import { cancelSync, getActualStatus, getHealth, getSyncStatus, startSync, type SyncStatus } from "../api";
+import type { ActualStatus } from "../types";
 
 export function HomePage() {
   const [status, setStatus] = useState<string>("loading");
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
+  const [actualStatus, setActualStatus] = useState<ActualStatus | null>(null);
 
   useEffect(() => {
     getHealth()
       .then((r) => setStatus(r.status))
       .catch(() => setStatus("error"));
+    getActualStatus()
+      .then(setActualStatus)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -161,6 +166,22 @@ export function HomePage() {
           <p className="eyebrow">Latest Transactions</p>
           <p className="stat-value">{sync?.last_transaction_date ?? "n/a"}</p>
           <p className="muted">Most recent transaction date</p>
+        </article>
+
+        <article className="panel stat-card">
+          <p className="eyebrow">Actual Budget</p>
+          <p className="stat-value">
+            {actualStatus
+              ? actualStatus.configured
+                ? `${actualStatus.pending} pending`
+                : "Not configured"
+              : "n/a"}
+          </p>
+          <p className="muted">
+            {actualStatus?.configured
+              ? `Syncing to ${actualStatus.file}`
+              : "Configure in Actual Budget page"}
+          </p>
         </article>
       </div>
     </section>

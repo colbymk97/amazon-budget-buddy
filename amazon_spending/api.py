@@ -60,6 +60,13 @@ class BudgetSubcategoryCreate(BaseModel):
     description: Optional[str] = None
 
 
+class ActualConfigPayload(BaseModel):
+    base_url: str
+    password: str
+    file: str
+    account_name: Optional[str] = None
+
+
 class TransactionBudgetUpdate(BaseModel):
     budget_category_id: Optional[int] = None
     budget_subcategory_id: Optional[int] = None
@@ -103,7 +110,9 @@ def _load_transaction_with_budget(conn, retailer_txn_id: str) -> dict[str, Any]:
             rt.budget_category_id,
             rt.budget_subcategory_id,
             bc.name AS budget_category_name,
-            bsc.name AS budget_subcategory_name
+            bsc.name AS budget_subcategory_name,
+            rt.actual_category_id,
+            rt.actual_category_name
         FROM retailer_transactions rt
         LEFT JOIN orders o ON o.order_id = rt.order_id
         LEFT JOIN budget_categories bc ON bc.category_id = rt.budget_category_id
@@ -668,7 +677,9 @@ def order_transactions(order_id: str):
                 raw_label,
                 source_url,
                 budget_category_id,
-                budget_subcategory_id
+                budget_subcategory_id,
+                actual_category_id,
+                actual_category_name
             FROM retailer_transactions
             WHERE order_id = ?
             ORDER BY COALESCE(txn_date, '0000-00-00') DESC, retailer_txn_id
@@ -731,7 +742,9 @@ def list_transactions(
                 at.budget_category_id,
                 at.budget_subcategory_id,
                 bc.name AS budget_category_name,
-                bsc.name AS budget_subcategory_name
+                bsc.name AS budget_subcategory_name,
+                at.actual_category_id,
+                at.actual_category_name
             FROM retailer_transactions at
             LEFT JOIN orders o ON o.order_id = at.order_id
             LEFT JOIN budget_categories bc ON bc.category_id = at.budget_category_id
@@ -884,6 +897,8 @@ def item_transactions(item_id: str):
                 at.raw_label,
                 at.budget_category_id,
                 at.budget_subcategory_id,
+                at.actual_category_id,
+                at.actual_category_name,
                 oit.allocated_amount_cents,
                 oit.method
             FROM order_item_transactions oit
@@ -932,6 +947,67 @@ def actual_status():
     }
 
 
+@app.post("/actual/configure")
+def actual_configure(payload: ActualConfigPayload):
+    """Save Actual Budget server configuration."""
+    from .actual_sync import ActualConfig, save_config
+
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        config = ActualConfig(
+            base_url=payload.base_url.strip(),
+            password=payload.password,
+            file=payload.file.strip(),
+            account_name=payload.account_name.strip() if payload.account_name else None,
+        )
+        save_config(conn, config)
+    finally:
+        conn.close()
+    return {
+        "configured": True,
+        "base_url": config.base_url,
+        "file": config.file,
+        "account_name": config.account_name,
+    }
+
+
+@app.post("/actual/test-connection")
+def actual_test_connection(payload: ActualConfigPayload):
+    """Test connectivity to an Actual Budget server."""
+    from .actual_sync import ActualConfig, test_connection
+
+    config = ActualConfig(
+        base_url=payload.base_url.strip(),
+        password=payload.password,
+        file=payload.file.strip(),
+        account_name=payload.account_name.strip() if payload.account_name else None,
+    )
+    try:
+        test_connection(config)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"success": True, "message": "Connection successful."}
+
+
+@app.get("/actual/categories")
+def actual_categories():
+    """Fetch budget categories from the connected Actual Budget server."""
+    from .actual_sync import load_config, get_actual_categories
+
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        cfg = load_config(conn)
+    finally:
+        conn.close()
+    if not cfg:
+        raise HTTPException(status_code=400, detail="Actual Budget is not configured.")
+    try:
+        cats = get_actual_categories(cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"rows": cats}
+
+
 @app.post("/actual/sync")
 def actual_sync(dry_run: bool = Query(False)):
     """Push unsynced retailer transactions to Actual Budget.
@@ -959,3 +1035,80 @@ def actual_sync(dry_run: bool = Query(False)):
     finally:
         conn.close()
     return {"dry_run": dry_run, **result.to_dict()}
+
+
+@app.post("/actual/auto-categorize")
+def actual_auto_categorize():
+    """Batch-categorize uncategorized transactions using AI and Actual Budget categories."""
+    from .actual_sync import load_config, get_actual_categories
+    from .ai_categorize import batch_categorize
+
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        cfg = load_config(conn)
+        if not cfg:
+            raise HTTPException(status_code=400, detail="Actual Budget is not configured.")
+
+        try:
+            categories = get_actual_categories(cfg)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        if not categories:
+            return {"categorized": 0, "total": 0, "message": "No categories found in Actual Budget."}
+
+        rows = conn.execute(
+            """
+            SELECT
+                rt.retailer_txn_id,
+                rt.order_id,
+                rt.amount_cents,
+                rt.txn_date,
+                GROUP_CONCAT(oi.title, ' | ') AS item_titles
+            FROM retailer_transactions rt
+            LEFT JOIN order_item_transactions oit ON oit.retailer_txn_id = rt.retailer_txn_id
+            LEFT JOIN order_items oi ON oi.item_id = oit.item_id
+            WHERE rt.actual_category_id IS NULL
+              AND rt.actual_synced_at IS NULL
+              AND rt.txn_date IS NOT NULL
+              AND rt.amount_cents IS NOT NULL
+            GROUP BY rt.retailer_txn_id
+            ORDER BY rt.txn_date DESC
+            """
+        ).fetchall()
+
+        transactions = [
+            {
+                "retailer_txn_id": r["retailer_txn_id"],
+                "order_id": r["order_id"],
+                "amount_cents": r["amount_cents"],
+                "txn_date": r["txn_date"],
+                "item_titles": r["item_titles"] or r["order_id"],
+            }
+            for r in rows
+        ]
+
+        if not transactions:
+            return {"categorized": 0, "total": 0, "message": "No uncategorized transactions to process."}
+
+        try:
+            results = batch_categorize(transactions, categories)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        categorized = 0
+        for mapping in results:
+            conn.execute(
+                """
+                UPDATE retailer_transactions
+                SET actual_category_id = ?, actual_category_name = ?, updated_at = datetime('now')
+                WHERE retailer_txn_id = ?
+                """,
+                (mapping["category_id"], mapping["category_name"], mapping["txn_id"]),
+            )
+            categorized += 1
+        conn.commit()
+
+        return {"categorized": categorized, "total": len(transactions)}
+    finally:
+        conn.close()

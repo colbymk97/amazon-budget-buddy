@@ -30,6 +30,29 @@ export type RetailerTransaction = {
   budget_subcategory_id?: number | null;
   budget_category_name?: string | null;
   budget_subcategory_name?: string | null;
+  actual_category_id?: string | null;
+  actual_category_name?: string | null;
+};
+
+export type ActualStatus = {
+  configured: boolean;
+  base_url?: string;
+  file?: string;
+  account_name?: string | null;
+  pending: number;
+};
+
+export type ActualCategory = {
+  id: string;
+  name: string;
+  group: string;
+};
+
+export type ActualConfigPayload = {
+  base_url: string;
+  password: string;
+  file: string;
+  account_name?: string;
 };
 
 

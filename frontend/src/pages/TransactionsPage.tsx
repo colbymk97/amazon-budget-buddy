@@ -32,8 +32,8 @@ export function TransactionsPage() {
       { accessorKey: "order_id", header: "Order ID" },
       { accessorKey: "amount_cents", header: "Amount", cell: (c) => formatMoney(c.getValue<number>()) },
       { accessorKey: "raw_label", header: "Label" },
-      { accessorKey: "payment_last4", header: "Last4" },
-      { accessorKey: "order_url", header: "Order URL" }
+      { accessorKey: "actual_category_name", header: "Category", cell: (c) => c.getValue<string>() ?? "-" },
+      { accessorKey: "payment_last4", header: "Last4" }
     ],
     []
   );

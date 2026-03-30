@@ -88,6 +88,40 @@ def save_config(conn: sqlite3.Connection, config: ActualConfig) -> None:
     conn.commit()
 
 
+def get_actual_categories(config: ActualConfig) -> list[dict]:
+    """Fetch all budget categories from the Actual Budget server.
+
+    Returns a flat list of ``{"id": str, "name": str, "group": str}`` dicts
+    where *group* is the parent category group name.
+    """
+    try:
+        from actual import Actual
+    except ImportError as exc:
+        raise RuntimeError(
+            "actualpy is not installed. Run: pip install actualpy"
+            " (or: pip install \"amazon-spending[actual]\")"
+        ) from exc
+
+    categories: list[dict] = []
+    with Actual(
+        base_url=config.base_url,
+        password=config.password,
+        file=config.file,
+    ) as actual:
+        from actual.queries import get_categories
+        cat_rows = get_categories(actual.session)
+        for cat in cat_rows:
+            if cat.is_income:
+                continue
+            group_name = cat.group.name if cat.group else "Uncategorized"
+            categories.append({
+                "id": str(cat.id),
+                "name": cat.name,
+                "group": group_name,
+            })
+    return categories
+
+
 def test_connection(config: ActualConfig) -> None:
     """Validate Actual Budget connectivity and selected budget/account access."""
     try:
