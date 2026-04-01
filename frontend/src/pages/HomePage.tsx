@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { cancelSync, getHealth, getSyncStatus, startSync, type SyncStatus } from "../api";
+import { cancelSync, getDbStatus, getHealth, getSyncStatus, startSync, type DbRetailerStatus, type SyncStatus } from "../api";
 
 export function HomePage() {
   const [status, setStatus] = useState<string>("loading");
   const [sync, setSync] = useState<SyncStatus | null>(null);
+  const [dbStats, setDbStats] = useState<DbRetailerStatus[] | null>(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
 
@@ -11,6 +12,9 @@ export function HomePage() {
     getHealth()
       .then((r) => setStatus(r.status))
       .catch(() => setStatus("error"));
+    getDbStatus()
+      .then((r) => setDbStats(r.retailers))
+      .catch(() => setDbStats([]));
   }, []);
 
   useEffect(() => {
@@ -143,6 +147,46 @@ export function HomePage() {
 
         {error ? <p className="error">{error}</p> : null}
       </article>
+
+      {dbStats && dbStats.length > 0 && (
+        <article className="panel">
+          <p className="eyebrow">Database</p>
+          <h3>Retailer Status</h3>
+          <table className="data-table" style={{ marginTop: "0.75rem" }}>
+            <thead>
+              <tr>
+                <th>Retailer</th>
+                <th>Orders</th>
+                <th>Transactions</th>
+                <th>Date Range</th>
+                <th>Last Import</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dbStats.map((r) => (
+                <tr key={r.retailer}>
+                  <td>{r.retailer}</td>
+                  <td>{r.orders.toLocaleString()}</td>
+                  <td>{r.transactions.toLocaleString()}</td>
+                  <td>
+                    {r.first_order_date ?? "—"} → {r.latest_order_date ?? "—"}
+                  </td>
+                  <td>
+                    {r.last_import_finished_at
+                      ? new Date(r.last_import_finished_at).toLocaleDateString()
+                      : "—"}{" "}
+                    {r.last_import_status ? (
+                      <span className={`status-pill ${r.last_import_status === "ok" ? "good" : "neutral"}`}>
+                        {r.last_import_status}
+                      </span>
+                    ) : null}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </article>
+      )}
 
       <div className="dashboard-stats">
         <article className="panel stat-card">

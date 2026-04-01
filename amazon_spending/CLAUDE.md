@@ -9,13 +9,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Install (dev mode)
 pip install -e ".[dev]"
-playwright install chromium
-
-# Run CLI
-amazon-spending init-db
-amazon-spending collect --retailer amazon
-amazon-spending import-transactions --csv PATH
-amazon-spending db-status
 
 # API server
 uvicorn amazon_spending.api:app --reload --host 127.0.0.1 --port 8000
@@ -41,43 +34,60 @@ npm run lint
 
 ## Architecture
 
-This is a **local-first budget reconciliation tool** that scrapes retailer order history into SQLite and matches it against imported bank/card transactions. No cloud services required.
+This is a **local-first budget reconciliation tool** that fetches retailer order history into SQLite and matches it against imported bank/card transactions. No cloud services required. Everything is managed through the web app — there is no CLI.
 
 ### Data flow
 
-1. `collect` → Playwright scrapes retailer orders → stored in SQLite
-2. `import-transactions` → CSV bank statements → stored in SQLite
-3. `matcher.py` → matches bank transactions to orders/shipments by amount + date
-4. `export` → CSV reconciliation reports; or browse via React UI + FastAPI
+1. User enters Amazon credentials in Settings → stored in `retailer_credentials` table
+2. Sync triggered via dashboard → `amazon-orders` library fetches orders + transactions → stored in SQLite
+3. CSV import via Settings → bank/card transactions stored in `transactions` table
+4. `matcher.py` → matches bank transactions to orders by amount + date
+5. Export via Settings → CSV reconciliation reports
 
 ### Key modules
 
 | Module | Responsibility |
 |--------|---------------|
-| `retailers/base.py` | `RetailerCollector` ABC — all scrapers implement this |
-| `retailers/amazon.py` | Playwright-based Amazon order scraper (~61KB) |
+| `retailers/base.py` | `RetailerCollector` ABC — all collectors implement this |
+| `retailers/amazon.py` | Amazon collector using `amazon-orders` library |
 | `retailers/__init__.py` | `REGISTRY` dict mapping retailer name → collector class |
-| `db.py` | SQLite connection, schema migrations (`_migrate_to_multi_retailer`) |
+| `db.py` | SQLite connection, schema migrations, credential helpers |
 | `sql/schema.sql` | Source of truth for table DDL |
 | `matcher.py` | Amount+date matching; confidence scoring |
 | `importers.py` | CSV transaction import with upsert logic |
-| `api.py` | FastAPI server; CORS for React frontend; thread-safe sync jobs |
+| `exporter.py` | CSV report generation |
+| `api.py` | FastAPI server; all endpoints; thread-safe sync jobs |
 | `actual_sync.py` | Optional sync to Actual Budget (`pip install -e ".[actual]"`) |
 
 ### Database
 
-SQLite at `data/amazon_spending.sqlite3` (configurable). Key tables: `orders`, `shipments`, `order_items`, `retailer_transactions`, `transactions` (imported bank data), `matches`, `budget_categories`, `budget_subcategories`, `actual_budget_config`, `import_runs`.
+SQLite at `data/amazon_spending.sqlite3`. Key tables: `orders`, `order_items`, `retailer_transactions`, `retailer_credentials` (email/password/otp_secret), `transactions` (imported bank data), `matches`, `budget_categories`, `budget_subcategories`, `actual_budget_config`, `retailer_import_runs`.
 
-All tables with retailer-specific data have a `retailer` column (multi-retailer migration handles legacy Amazon-only databases).
+All retailer-specific tables have a `retailer` column (multi-retailer ready).
+
+### Amazon auth
+
+Credentials (email, password, optional OTP secret) are stored in `retailer_credentials` and entered via the Settings page. The `amazon-orders` library handles login and 2FA automatically using these credentials. No browser profile / Playwright required.
 
 ### Adding a new retailer
 
 1. Create `retailers/<name>.py` implementing `RetailerCollector` from `retailers/base.py`
 2. Register it in `retailers/__init__.py` `REGISTRY`
+3. The `collect()` method signature: `conn, output_dir, *, start_date, end_date, order_limit, should_abort, known_order_ids`
 
-### Frontend
+### Frontend pages
 
-React 18 + Vite + React Router + TanStack Table + Tailwind CSS. API calls go to `http://localhost:8000`. Pages map to: orders, items, transactions, reports, admin (sync control), and a baby-sitter spending tracker.
+React 18 + Vite + React Router + TanStack Table + Tailwind CSS. API at `http://localhost:8000`.
+
+| Route | Purpose |
+|-------|---------|
+| `/` | Dashboard — sync control, DB status |
+| `/orders` | Order history |
+| `/transactions` | Retailer payment transactions |
+| `/items` | Line items |
+| `/reports` | Monthly analytics |
+| `/admin` | Budget categories |
+| `/settings` | Amazon credentials, CSV import/export, Actual Budget config |
 
 ## Configuration
 

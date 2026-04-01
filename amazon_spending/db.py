@@ -136,6 +136,15 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
 
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS retailer_credentials (
+            retailer TEXT PRIMARY KEY,
+            email TEXT NOT NULL,
+            password TEXT NOT NULL,
+            otp_secret TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS budget_categories (
             category_id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
@@ -395,6 +404,49 @@ def summarize_retailer_status(conn: sqlite3.Connection) -> list[RetailerStatusSu
             )
         )
     return summaries
+
+
+def get_retailer_credentials(conn: sqlite3.Connection, retailer: str) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT retailer, email, otp_secret, created_at, updated_at FROM retailer_credentials WHERE retailer = ?",
+        (retailer,),
+    ).fetchone()
+
+
+def upsert_retailer_credentials(
+    conn: sqlite3.Connection,
+    retailer: str,
+    email: str,
+    password: str,
+    otp_secret: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO retailer_credentials (retailer, email, password, otp_secret, updated_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(retailer) DO UPDATE SET
+            email = excluded.email,
+            password = excluded.password,
+            otp_secret = excluded.otp_secret,
+            updated_at = datetime('now')
+        """,
+        (retailer, email, password, otp_secret),
+    )
+    conn.commit()
+
+
+def get_retailer_password(conn: sqlite3.Connection, retailer: str) -> str | None:
+    row = conn.execute(
+        "SELECT password FROM retailer_credentials WHERE retailer = ?",
+        (retailer,),
+    ).fetchone()
+    return row["password"] if row else None
+
+
+def delete_retailer_credentials(conn: sqlite3.Connection, retailer: str) -> bool:
+    cur = conn.execute("DELETE FROM retailer_credentials WHERE retailer = ?", (retailer,))
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def db_status_payload(conn: sqlite3.Connection) -> dict[str, Any]:

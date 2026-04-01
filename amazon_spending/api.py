@@ -1,24 +1,34 @@
 from __future__ import annotations
 
+import io
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .db import connect, init_db
+from .db import (
+    connect,
+    db_status_payload,
+    delete_retailer_credentials,
+    get_retailer_credentials,
+    init_db,
+    upsert_retailer_credentials,
+)
+from .exporter import export_reports
+from .importers import import_transactions_csv
 from .retailers import REGISTRY
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_API_DB_PATH = PROJECT_ROOT / "data/amazon_spending.sqlite3"
 DEFAULT_RAW_OUTDIR = PROJECT_ROOT / "data/raw/amazon"
-DEFAULT_PROFILE_DIR = PROJECT_ROOT / "data/raw/amazon/browser_profile"
 
-app = FastAPI(title="Budget Buddy API", version="0.1.0")
+app = FastAPI(title="Budget Buddy API", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -49,6 +59,10 @@ _SYNC_STATE: dict[str, Any] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
 class BudgetCategoryCreate(BaseModel):
     name: str
     description: Optional[str] = None
@@ -64,6 +78,23 @@ class TransactionBudgetUpdate(BaseModel):
     budget_category_id: Optional[int] = None
     budget_subcategory_id: Optional[int] = None
 
+
+class CredentialsUpsert(BaseModel):
+    email: str
+    password: str
+    otp_secret: Optional[str] = None
+
+
+class ActualConfigUpsert(BaseModel):
+    base_url: str
+    password: str
+    file: str
+    account_name: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _rows_to_dict(rows) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
@@ -158,39 +189,8 @@ def _incremental_start_date(last_order_date: str | None, overlap_days: int = 2) 
     return (d - timedelta(days=max(0, overlap_days))).isoformat()
 
 
-def _incremental_max_pages(
-    last_order_date: str | None,
-    overlap_days: int = 2,
-    orders_per_day_estimate: int = 4,
-    min_pages: int = 2,
-    max_pages: int = 16,
-) -> int:
-    if not last_order_date:
-        return max_pages
-    try:
-        last = datetime.strptime(last_order_date, "%Y-%m-%d").date()
-    except ValueError:
-        return max_pages
-
-    today = datetime.now(timezone.utc).date()
-    days_since = max(1, (today - last).days + max(0, overlap_days))
-    estimated_orders = max(1, days_since * max(1, orders_per_day_estimate))
-    pages = ((estimated_orders + 9) // 10) + 1
-    return max(min_pages, min(max_pages, pages))
-
-
-def _should_retry_headed(result) -> bool:
-    if getattr(result, "status", None) == "auth_required":
-        return True
-    return (
-        getattr(result, "status", None) == "no_data"
-        and int(getattr(result, "orders_collected", 0) or 0) == 0
-        and int(getattr(result, "discovered_orders", 0) or 0) == 0
-    )
-
-
 def _sync_completion_note(since_date: str | None, new_orders: int, new_txns: int) -> str:
-    since_label = since_date or "your last import"
+    since_label = since_date or "the beginning"
     if new_orders <= 0 and new_txns <= 0:
         return f"No new orders found since {since_label}."
     return (
@@ -214,6 +214,10 @@ def _cancel_requested() -> bool:
         return bool(_SYNC_STATE.get("cancel_requested"))
 
 
+# ---------------------------------------------------------------------------
+# Sync job
+# ---------------------------------------------------------------------------
+
 def _run_sync_job() -> None:
     _set_sync_state(
         running=True,
@@ -236,24 +240,19 @@ def _run_sync_job() -> None:
             recent_known_order_ids = _recent_order_ids(conn_before, limit=30)
         finally:
             conn_before.close()
+
+        sync_start_date = _incremental_start_date(before_order_date, overlap_days=2)
+
         _set_sync_state(
             progress=15,
             stage="collecting",
             last_order_date=before_order_date,
             last_transaction_date=before_txn_date,
             sync_since_date=before_order_date,
-            notes="Collecting latest orders and transactions...",
-        )
-        sync_start_date = _incremental_start_date(before_order_date, overlap_days=2)
-        sync_max_pages = _incremental_max_pages(before_order_date, overlap_days=2)
-        if recent_known_order_ids:
-            sync_max_pages = max(sync_max_pages, 40)
-        _set_sync_state(
             notes=(
-                "Collecting latest orders and transactions "
-                f"(since={before_order_date or 'full import'}, "
-                f"start_date={sync_start_date or 'none'}, max_pages_cap={sync_max_pages})..."
-            )
+                f"Collecting latest orders and transactions "
+                f"(since={before_order_date or 'full import'})..."
+            ),
         )
 
         conn = connect(DEFAULT_API_DB_PATH)
@@ -262,41 +261,11 @@ def _run_sync_job() -> None:
                 conn=conn,
                 output_dir=DEFAULT_RAW_OUTDIR,
                 start_date=sync_start_date,
-                max_pages=sync_max_pages,
-                headless=True,
-                user_data_dir=DEFAULT_PROFILE_DIR,
-                allow_interactive_auth=False,
                 should_abort=_cancel_requested,
-                stop_when_before_start_date=True,
                 known_order_ids=recent_known_order_ids,
             )
         finally:
             conn.close()
-
-        # Some sessions are valid but Amazon still challenges headless mode.
-        # Retry once headed (non-interactive) using the same persistent profile.
-        if _should_retry_headed(result):
-            _set_sync_state(
-                progress=35,
-                stage="retry_headed",
-                notes="Headless scrape returned no usable data. Retrying in a visible browser window...",
-            )
-            conn_retry = connect(DEFAULT_API_DB_PATH)
-            try:
-                result = REGISTRY["amazon"].collect(
-                    conn=conn_retry,
-                    output_dir=DEFAULT_RAW_OUTDIR,
-                    start_date=sync_start_date,
-                    max_pages=sync_max_pages,
-                    headless=False,
-                    user_data_dir=DEFAULT_PROFILE_DIR,
-                    allow_interactive_auth=False,
-                    should_abort=_cancel_requested,
-                    stop_when_before_start_date=True,
-                    known_order_ids=recent_known_order_ids,
-                )
-            finally:
-                conn_retry.close()
 
         if result.status == "cancelled":
             _set_sync_state(
@@ -313,16 +282,33 @@ def _run_sync_job() -> None:
             )
             return
 
-        _set_sync_state(progress=90, stage="finalizing", notes="Finalizing import and computing deltas...")
+        if result.status in ("auth_required", "error"):
+            _set_sync_state(
+                running=False,
+                cancel_requested=False,
+                progress=100,
+                stage="error",
+                finished_at=_utcnow_iso(),
+                status=result.status,
+                notes=result.notes,
+                error=result.notes,
+                new_orders_added=0,
+                new_transactions_added=0,
+            )
+            return
+
+        _set_sync_state(progress=90, stage="finalizing", notes="Finalizing import...")
         conn_after = connect(DEFAULT_API_DB_PATH)
         try:
             after_order_date, after_txn_date = _latest_dates(conn_after)
         finally:
             conn_after.close()
 
-        new_txns = int(getattr(result, "amazon_txns_inserted", 0) or 0)  # field name kept for compat
-        new_orders = int(getattr(result, "orders_inserted", 0) or 0)
+        new_txns = result.amazon_txns_inserted
+        new_orders = result.orders_inserted
         notes = _sync_completion_note(before_order_date, new_orders, new_txns)
+        if result.notes:
+            notes = f"{notes} {result.notes}".strip()
 
         _set_sync_state(
             running=False,
@@ -330,9 +316,9 @@ def _run_sync_job() -> None:
             progress=100,
             stage="complete",
             finished_at=_utcnow_iso(),
-            status=result.status,
-            notes=notes if result.status == "ok" else result.notes,
-            error=None if result.status == "ok" else result.notes,
+            status="ok",
+            notes=notes,
+            error=None,
             last_order_date=after_order_date,
             last_transaction_date=after_txn_date,
             new_transactions_added=new_txns,
@@ -362,6 +348,10 @@ def _ensure_api_db_schema() -> None:
 
 _ensure_api_db_schema()
 
+
+# ---------------------------------------------------------------------------
+# Sync endpoints
+# ---------------------------------------------------------------------------
 
 @app.get("/sync/status")
 def sync_status():
@@ -400,10 +390,137 @@ def sync_cancel():
     return {"cancelled": True, "message": "Cancellation requested."}
 
 
+# ---------------------------------------------------------------------------
+# Health / DB status
+# ---------------------------------------------------------------------------
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+@app.get("/db/status")
+def db_status_endpoint():
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        return db_status_payload(conn)
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------------------------
+
+@app.get("/credentials/{retailer}")
+def get_credentials(retailer: str):
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        row = get_retailer_credentials(conn, retailer)
+        if not row:
+            return {"configured": False}
+        return {
+            "configured": True,
+            "email": row["email"],
+            "has_otp_secret": bool(row["otp_secret"]),
+            "updated_at": row["updated_at"],
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/credentials/{retailer}")
+def save_credentials(retailer: str, payload: CredentialsUpsert):
+    if not payload.email.strip():
+        raise HTTPException(status_code=400, detail="Email is required")
+    if not payload.password.strip():
+        raise HTTPException(status_code=400, detail="Password is required")
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        upsert_retailer_credentials(
+            conn,
+            retailer,
+            payload.email.strip(),
+            payload.password,
+            payload.otp_secret or None,
+        )
+        return {"saved": True}
+    finally:
+        conn.close()
+
+
+@app.delete("/credentials/{retailer}")
+def remove_credentials(retailer: str):
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        deleted = delete_retailer_credentials(conn, retailer)
+        return {"deleted": deleted}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# CSV import
+# ---------------------------------------------------------------------------
+
+@app.post("/import/transactions")
+async def import_transactions(
+    file: UploadFile,
+    account_id: Optional[str] = Query(default=None),
+):
+    if not file.filename or not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Please upload a .csv file")
+
+    content = await file.read()
+    tmp_path = PROJECT_ROOT / "data" / f"_upload_{file.filename}"
+    try:
+        tmp_path.write_bytes(content)
+        conn = connect(DEFAULT_API_DB_PATH)
+        try:
+            count = import_transactions_csv(conn, tmp_path, account_id=account_id or None)
+        finally:
+            conn.close()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    return {"imported": count}
+
+
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+@app.get("/export/csv")
+def export_csv():
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        outdir = PROJECT_ROOT / "data" / "exports"
+        paths = export_reports(conn, outdir)
+    finally:
+        conn.close()
+
+    # Return a zip of all report files
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, path in paths.items():
+            if path.exists():
+                zf.write(path, path.name)
+    buf.seek(0)
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=budget_buddy_export.zip"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Budget categories
+# ---------------------------------------------------------------------------
 
 @app.get("/budget/categories")
 def list_budget_categories():
@@ -571,6 +688,10 @@ def assign_transaction_budget(retailer_txn_id: str, payload: TransactionBudgetUp
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Orders
+# ---------------------------------------------------------------------------
+
 @app.get("/orders")
 def list_orders(
     search: str = Query(default=""),
@@ -705,6 +826,10 @@ def order_items(order_id: str):
         conn.close()
 
 
+# ---------------------------------------------------------------------------
+# Retailer transactions
+# ---------------------------------------------------------------------------
+
 @app.get("/transactions")
 def list_transactions(
     search: str = Query(default=""),
@@ -791,6 +916,10 @@ def transaction_items(retailer_txn_id: str):
     finally:
         conn.close()
 
+
+# ---------------------------------------------------------------------------
+# Items
+# ---------------------------------------------------------------------------
 
 @app.get("/items")
 def list_items(
@@ -904,7 +1033,6 @@ def item_transactions(item_id: str):
 
 @app.get("/actual/status")
 def actual_status():
-    """Return Actual Budget configuration status and count of pending transactions."""
     from .actual_sync import load_config
 
     conn = connect(DEFAULT_API_DB_PATH)
@@ -932,16 +1060,49 @@ def actual_status():
     }
 
 
+@app.post("/actual/configure")
+def actual_configure(payload: ActualConfigUpsert):
+    if not payload.base_url.strip():
+        raise HTTPException(status_code=400, detail="base_url is required")
+    if not payload.file.strip():
+        raise HTTPException(status_code=400, detail="file is required")
+    if not payload.password.strip():
+        raise HTTPException(status_code=400, detail="password is required")
+
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        conn.execute(
+            """
+            INSERT INTO actual_budget_config (singleton_id, base_url, password, file, account_name, updated_at)
+            VALUES (1, ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(singleton_id) DO UPDATE SET
+                base_url = excluded.base_url,
+                password = excluded.password,
+                file = excluded.file,
+                account_name = excluded.account_name,
+                updated_at = datetime('now')
+            """,
+            (payload.base_url.strip(), payload.password, payload.file.strip(), payload.account_name),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"saved": True}
+
+
+@app.delete("/actual/configure")
+def actual_configure_delete():
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        conn.execute("DELETE FROM actual_budget_config WHERE singleton_id = 1")
+        conn.commit()
+    finally:
+        conn.close()
+    return {"deleted": True}
+
+
 @app.post("/actual/sync")
 def actual_sync(dry_run: bool = Query(False)):
-    """Push unsynced retailer transactions to Actual Budget.
-
-    Each matched transaction has its notes updated with the Amazon order ID
-    and the line-items allocated to it. Transactions are only synced once;
-    already-synced rows are skipped.
-
-    Pass ``?dry_run=true`` to preview matches without writing any changes.
-    """
     from .actual_sync import load_config, sync_to_actual
 
     conn = connect(DEFAULT_API_DB_PATH)
@@ -950,10 +1111,7 @@ def actual_sync(dry_run: bool = Query(False)):
         if not cfg:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    "Actual Budget is not configured. "
-                    "Run the actual-configure CLI command first."
-                ),
+                detail="Actual Budget is not configured. Add it in Settings first.",
             )
         result = sync_to_actual(conn, cfg, dry_run=dry_run)
     finally:

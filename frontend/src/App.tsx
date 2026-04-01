@@ -8,7 +8,7 @@ import { TransactionDetailPage } from "./pages/TransactionDetailPage";
 import { ItemDetailPage } from "./pages/ItemDetailPage";
 import { BabySisterPage } from "./pages/BabySisterPage";
 import { ReportsPage } from "./pages/ReportsPage";
-import { AdminPage } from "./pages/AdminPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 const navItems = [
   { to: "/", label: "Dashboard", meta: "Sync and health" },
@@ -16,7 +16,7 @@ const navItems = [
   { to: "/transactions", label: "Transactions", meta: "Payment events" },
   { to: "/items", label: "Items", meta: "Line-item detail" },
   { to: "/reports", label: "Reports", meta: "Monthly analytics" },
-  { to: "/admin", label: "Admin", meta: "Budget metadata" },
+  { to: "/settings", label: "Settings", meta: "Auth & integrations" },
   { to: "/baby-sister", label: "Baby Sister", meta: "Bonus screen" }
 ] as const;
 
@@ -82,7 +82,7 @@ export function App() {
             <Route path="/items" element={<ItemsPage />} />
             <Route path="/items/:itemId" element={<ItemDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/admin" element={<AdminPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route path="/baby-sister" element={<BabySisterPage />} />
           </Routes>
         </main>

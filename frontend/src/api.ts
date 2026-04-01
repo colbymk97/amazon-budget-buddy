@@ -145,6 +145,131 @@ export async function createBudgetCategory(payload: { name: string; description?
   return res.json() as Promise<BudgetCategory>;
 }
 
+// ---------------------------------------------------------------------------
+// Credentials
+// ---------------------------------------------------------------------------
+
+export type CredentialsStatus = {
+  configured: boolean;
+  email?: string;
+  has_otp_secret?: boolean;
+  updated_at?: string;
+};
+
+export function getCredentials(retailer: string) {
+  return getJson<CredentialsStatus>(`/credentials/${retailer}`);
+}
+
+export async function saveCredentials(
+  retailer: string,
+  payload: { email: string; password: string; otp_secret?: string }
+) {
+  const res = await fetch(`${API_BASE}/credentials/${retailer}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ saved: boolean }>;
+}
+
+export async function deleteCredentials(retailer: string) {
+  const res = await fetch(`${API_BASE}/credentials/${retailer}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json() as Promise<{ deleted: boolean }>;
+}
+
+// ---------------------------------------------------------------------------
+// Actual Budget config
+// ---------------------------------------------------------------------------
+
+export type ActualStatus = {
+  configured: boolean;
+  base_url?: string;
+  file?: string;
+  account_name?: string;
+  pending?: number;
+};
+
+export function getActualStatus() {
+  return getJson<ActualStatus>(`/actual/status`);
+}
+
+export async function saveActualConfig(payload: {
+  base_url: string;
+  password: string;
+  file: string;
+  account_name?: string;
+}) {
+  const res = await fetch(`${API_BASE}/actual/configure`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ saved: boolean }>;
+}
+
+export async function deleteActualConfig() {
+  const res = await fetch(`${API_BASE}/actual/configure`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json() as Promise<{ deleted: boolean }>;
+}
+
+export async function runActualSync(dry_run = false) {
+  const res = await fetch(`${API_BASE}/actual/sync?dry_run=${dry_run}`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
+  }
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// CSV import / export
+// ---------------------------------------------------------------------------
+
+export async function importTransactionsCsv(file: File, account_id?: string) {
+  const form = new FormData();
+  form.append("file", file);
+  const url = `${API_BASE}/import/transactions${account_id ? `?account_id=${encodeURIComponent(account_id)}` : ""}`;
+  const res = await fetch(url, { method: "POST", body: form });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ imported: number }>;
+}
+
+export function getExportUrl() {
+  return `${API_BASE}/export/csv`;
+}
+
+// ---------------------------------------------------------------------------
+// DB status
+// ---------------------------------------------------------------------------
+
+export type DbRetailerStatus = {
+  retailer: string;
+  orders: number;
+  transactions: number;
+  first_order_date: string | null;
+  latest_order_date: string | null;
+  last_import_finished_at: string | null;
+  last_import_status: string | null;
+  bound_account: string | null;
+};
+
+export function getDbStatus() {
+  return getJson<{ retailers: DbRetailerStatus[] }>(`/db/status`);
+}
+
 export function listBudgetSubcategories(category_id?: number) {
   const q = toQuery({ category_id });
   return getJson<RowsResponse<BudgetSubcategory>>(`/budget/subcategories${q ? `?${q}` : ""}`);

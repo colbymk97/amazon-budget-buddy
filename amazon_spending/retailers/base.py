@@ -16,9 +16,6 @@ class CollectResult:
     orders_inserted: int = 0
     orders_updated: int = 0
     orders_unchanged: int = 0
-    shipments_inserted: int = 0
-    shipments_updated: int = 0
-    shipments_unchanged: int = 0
     items_inserted: int = 0
     items_updated: int = 0
     items_unchanged: int = 0
@@ -28,7 +25,6 @@ class CollectResult:
     amazon_txns_unchanged: int = 0
     amazon_txns_deleted: int = 0
     item_txn_links_written: int = 0
-    listing_pages_scanned: int = 0
     discovered_orders: int = 0
     known_orders_matched: int = 0
 
@@ -70,7 +66,7 @@ class ParsedRetailerTransaction:
 @dataclass
 class LoginResult:
     """Result of a retailer login attempt."""
-    status: str        # "logged_in" | "login_required" | "timeout" | "cancelled"
+    status: str        # "logged_in" | "login_required" | "timeout" | "cancelled" | "error"
     message: str
     already_logged_in: bool = False
     account_label: str | None = None
@@ -78,32 +74,13 @@ class LoginResult:
 
 
 class RetailerCollector(ABC):
-    """Abstract base for retailer-specific order scrapers.
+    """Abstract base for retailer-specific order collectors.
 
     Subclasses must set RETAILER_ID (a short lowercase slug, e.g. "amazon")
     and implement collect().
     """
 
     RETAILER_ID: ClassVar[str]
-
-    def login(
-        self,
-        user_data_dir: Path | None = None,
-        *,
-        check_only: bool = False,
-        timeout_s: int = 300,
-    ) -> LoginResult:
-        """Open a browser for the user to log in to this retailer.
-
-        Args:
-            user_data_dir: Persistent browser profile path (default: retailer-specific).
-            check_only: If True, run headless and only check login state; don't wait.
-            timeout_s: Seconds to wait for manual login before giving up.
-
-        Returns:
-            LoginResult describing the outcome.
-        """
-        raise NotImplementedError(f"{self.__class__.__name__} does not support login command")
 
     @abstractmethod
     def collect(
@@ -114,36 +91,19 @@ class RetailerCollector(ABC):
         start_date: str | None = None,
         end_date: str | None = None,
         order_limit: int | None = None,
-        max_pages: int | None = None,
-        headless: bool = True,
-        user_data_dir: Path | None = None,
-        test_run: bool = False,
-        saved_run_dir: Path | None = None,
-        allow_interactive_auth: bool = True,
         should_abort: Callable[[], bool] | None = None,
-        stop_when_before_start_date: bool = False,
         known_order_ids: list[str] | None = None,
-        overlap_match_threshold: int = 1,
     ) -> CollectResult:
-        """Scrape orders for this retailer and reconcile into the DB.
+        """Fetch orders for this retailer and reconcile into the DB.
 
         Args:
             conn: Open SQLite connection (schema already initialized).
-            output_dir: Directory to write raw HTML snapshots.
+            output_dir: Directory for any raw data snapshots.
             start_date: ISO date lower bound (inclusive).
             end_date: ISO date upper bound (inclusive).
             order_limit: Max orders to collect in this run.
-            max_pages: Max listing pages to traverse.
-            headless: Run browser headless (subclass may ignore for non-browser scrapers).
-            user_data_dir: Persistent browser profile path.
-            test_run: Skip browser launch; parse saved HTML instead.
-            saved_run_dir: Specific snapshot dir to parse (implies test_run).
-            allow_interactive_auth: Allow prompting for login in headed mode.
             should_abort: Callable polled each iteration; return True to stop early.
-            stop_when_before_start_date: Stop when listing pages reach orders older
-                than start_date.
-            known_order_ids: Recently seen order IDs; used for incremental stop logic.
-            overlap_match_threshold: Minimum known-ID hits before stopping scan.
+            known_order_ids: Recently seen order IDs for incremental stop logic.
 
         Returns:
             CollectResult with counts of collected and reconciled records.

@@ -680,3 +680,68 @@ progress::-moz-progress-bar {
     max-width: none;
   }
 }
+
+/* Settings page */
+.settings-grid {
+  display: grid;
+  gap: 1.5rem;
+  grid-template-columns: 1fr;
+  max-width: 700px;
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--text-muted, #999);
+}
+
+.settings-form input[type="text"],
+.settings-form input[type="email"],
+.settings-form input[type="password"],
+.settings-form input[type="url"],
+.settings-form input[type="file"] {
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border, #333);
+  background: var(--surface-2, #1a1a1a);
+  color: var(--text, #eee);
+  font-size: 0.9rem;
+}
+
+.settings-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border, #444);
+  color: var(--text-muted, #999);
+  padding: 0.3rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.btn-ghost:hover {
+  border-color: var(--text, #eee);
+  color: var(--text, #eee);
+}
+
+.success-msg {
+  color: #4ade80;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
