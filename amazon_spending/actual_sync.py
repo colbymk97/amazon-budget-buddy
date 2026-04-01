@@ -130,6 +130,7 @@ def _build_note(order_id: str, items: list) -> str:
         Amazon Order: 112-3456789-0123456
         • 1x Some Product Name ($15.99)
         • 2x Another Product ($12.50 each)
+        #amazon-sync
     """
     lines = [f"Amazon Order: {order_id}"]
     for item in items:
@@ -140,6 +141,7 @@ def _build_note(order_id: str, items: list) -> str:
             lines.append(f"• {qty}x {title} (${alloc / 100:.2f})")
         else:
             lines.append(f"• {qty}x {title}")
+    lines.append("#amazon-sync")
     return "\n".join(lines)
 
 
