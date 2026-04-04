@@ -166,6 +166,7 @@ CREATE TABLE IF NOT EXISTS retailer_credentials (
     email TEXT NOT NULL,
     password TEXT NOT NULL,
     otp_secret TEXT,
+    cookie_jar_path TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );

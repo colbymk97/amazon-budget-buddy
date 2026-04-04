@@ -9,7 +9,11 @@ import {
   saveActualConfig,
   saveCredentials,
   getExportUrl,
+  startBrowserLogin,
+  getBrowserLoginStatus,
+  cancelBrowserLogin,
   type ActualStatus,
+  type BrowserLoginStatus,
   type CredentialsStatus,
 } from "../api";
 
@@ -117,7 +121,102 @@ function AmazonCredentialsPanel() {
       </form>
 
       {msg && <p className={msg.ok ? "success-msg" : "error"}>{msg.text}</p>}
+
+      {status?.configured && <BrowserLoginSection />}
     </article>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Browser Login section (within credentials panel)
+// ---------------------------------------------------------------------------
+
+function BrowserLoginSection() {
+  const [authStatus, setAuthStatus] = useState<BrowserLoginStatus | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const poll = () =>
+    getBrowserLoginStatus()
+      .then(setAuthStatus)
+      .catch(() => {});
+
+  useEffect(() => {
+    poll();
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
+
+  // Start/stop polling when running state changes.
+  useEffect(() => {
+    if (authStatus?.running && !pollRef.current) {
+      pollRef.current = setInterval(poll, 1500);
+    } else if (!authStatus?.running && pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, [authStatus?.running]);
+
+  const onStart = async () => {
+    try {
+      await startBrowserLogin();
+      pollRef.current = setInterval(poll, 1500);
+      poll();
+    } catch (err) {
+      setAuthStatus((prev) => ({
+        running: false,
+        status: "error",
+        message: String(err),
+        started_at: prev?.started_at ?? null,
+        finished_at: null,
+      }));
+    }
+  };
+
+  const onCancel = async () => {
+    try {
+      await cancelBrowserLogin();
+    } catch {
+      // ignore
+    }
+  };
+
+  const isActive = authStatus?.status === "authenticated" || authStatus?.status === "ok";
+
+  return (
+    <div style={{ marginTop: "1.25rem", borderTop: "1px solid var(--border)", paddingTop: "1rem" }}>
+      <h4 style={{ margin: "0 0 0.25rem" }}>Browser Login</h4>
+      <p className="muted" style={{ marginBottom: "0.75rem" }}>
+        Opens a browser window so you can log in to Amazon directly. This bypasses CAPTCHA
+        challenges that block automated login.
+      </p>
+
+      {isActive && (
+        <div style={{ marginBottom: "0.5rem" }}>
+          <span className="status-pill good">Browser session active</span>
+        </div>
+      )}
+
+      {authStatus?.running ? (
+        <div>
+          <p>{authStatus.message || "Browser window is open — please complete login."}</p>
+          <button className="btn-ghost" onClick={onCancel}>
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <button onClick={onStart}>
+          {isActive ? "Re-authenticate" : "Open Browser Login"}
+        </button>
+      )}
+
+      {!authStatus?.running && authStatus?.status === "error" && (
+        <p className="error">{authStatus.message}</p>
+      )}
+      {!authStatus?.running && authStatus?.status === "timeout" && (
+        <p className="error">{authStatus.message}</p>
+      )}
+    </div>
   );
 }
 

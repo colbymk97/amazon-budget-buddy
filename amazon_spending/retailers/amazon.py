@@ -6,6 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
+from amazonorders.conf import AmazonOrdersConfig
 from amazonorders.orders import AmazonOrders
 from amazonorders.session import AmazonSession
 from amazonorders.transactions import AmazonTransactions
@@ -178,20 +179,86 @@ class AmazonCollector(RetailerCollector):
 
     def _get_session(self, conn: sqlite3.Connection) -> AmazonSession:
         creds = conn.execute(
-            "SELECT email, password, otp_secret FROM retailer_credentials WHERE retailer = ?",
+            "SELECT email, password, otp_secret, cookie_jar_path FROM retailer_credentials WHERE retailer = ?",
             (RETAILER,),
         ).fetchone()
         if not creds:
             raise RuntimeError(
                 "Amazon credentials not configured. Add them in Settings before syncing."
             )
-        session = AmazonSession(
-            username=creds["email"],
-            password=creds["password"],
-            otp_secret_key=creds["otp_secret"],
-        )
-        session.login()
+        config_kwargs: dict = {}
+        cookie_jar_path = creds["cookie_jar_path"]
+        if cookie_jar_path:
+            config_kwargs["data"] = {"cookie_jar_path": cookie_jar_path}
+
+        def _build_session() -> AmazonSession:
+            return AmazonSession(
+                username=creds["email"],
+                password=creds["password"],
+                otp_secret_key=creds["otp_secret"],
+                config=AmazonOrdersConfig(**config_kwargs) if config_kwargs else None,
+            )
+
+        session = _build_session()
+
+        # Cookies-first: if the cookie jar already contains valid auth
+        # cookies (e.g. from a prior Browser Login), skip login() entirely.
+        # Calling login() would visit the sign-in URL which can trigger
+        # Amazon's JS challenge even when cookies are perfectly valid.
+        if session.auth_cookies_stored():
+            session.is_authenticated = True
+            return session
+
+        # Cookie jar is empty or stale. Try refreshing from the persistent
+        # Playwright profile headlessly — if the profile is still logged in
+        # this gets fresh cookies without any user interaction.
+        if cookie_jar_path:
+            session = self._try_headless_cookie_refresh(cookie_jar_path, _build_session)
+            if session:
+                return session
+
+        # Fall back to normal library login.
+        try:
+            session = _build_session()
+            session.login()
+        except Exception as exc:
+            if "JavaScript-based authentication challenge" in str(exc):
+                raise RuntimeError(
+                    "Amazon requires browser authentication. "
+                    "Go to Settings and click 'Browser Login' to authenticate."
+                ) from exc
+            raise
+
         return session
+
+    @staticmethod
+    def _try_headless_cookie_refresh(
+        cookie_jar_path: str,
+        build_session: Callable[[], AmazonSession],
+    ) -> AmazonSession | None:
+        """Try to refresh the cookie jar from the Playwright profile (headless).
+
+        Returns an authenticated AmazonSession if successful, None otherwise.
+        """
+        from pathlib import Path
+        profile_dir = Path(cookie_jar_path).parent.parent / "browser_profiles" / "amazon"
+        if not profile_dir.exists():
+            return None
+        try:
+            from .browser_auth import browser_login_amazon  # noqa: F811 (intentional lazy import, not a redefinition)
+            result = browser_login_amazon(
+                cookie_jar_path=cookie_jar_path,
+                profile_dir=str(profile_dir),
+                timeout_seconds=30,
+            )
+            if result.status == "ok":
+                session = build_session()
+                if session.auth_cookies_stored():
+                    session.is_authenticated = True
+                    return session
+        except Exception:
+            pass
+        return None
 
     def collect(
         self,
@@ -228,7 +295,24 @@ class AmazonCollector(RetailerCollector):
             try:
                 year_orders = amazon_orders_client.get_order_history(year=year, full_details=True)
             except Exception as exc:
-                return CollectResult(status="error", notes=f"Failed fetching {year} orders: {exc}")
+                if "redirected to login" in str(exc).lower() or "reauthenticate" in str(exc).lower():
+                    # Cookies were stale. Try login() to refresh the session.
+                    try:
+                        session.login()
+                        amazon_orders_client = AmazonOrders(session)
+                        year_orders = amazon_orders_client.get_order_history(year=year, full_details=True)
+                    except Exception as retry_exc:
+                        if "JavaScript-based authentication challenge" in str(retry_exc):
+                            return CollectResult(
+                                status="auth_required",
+                                notes=(
+                                    "Session expired and Amazon requires browser authentication. "
+                                    "Go to Settings and click 'Browser Login' to re-authenticate."
+                                ),
+                            )
+                        return CollectResult(status="auth_required", notes=f"Session expired: {retry_exc}")
+                else:
+                    return CollectResult(status="error", notes=f"Failed fetching {year} orders: {exc}")
 
             stop_year = False
             for order in year_orders:

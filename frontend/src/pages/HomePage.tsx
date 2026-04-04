@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { cancelSync, getDbStatus, getHealth, getSyncStatus, startSync, type DbRetailerStatus, type SyncStatus } from "../api";
 
 export function HomePage() {
@@ -17,30 +18,36 @@ export function HomePage() {
       .catch(() => setDbStats([]));
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    let timer: number | null = null;
+  const pollTimer = useRef<number | null>(null);
+  const pollActive = useRef(true);
+
+  const startPolling = useCallback(() => {
+    if (pollTimer.current) window.clearTimeout(pollTimer.current);
 
     const poll = async () => {
       try {
         const s = await getSyncStatus();
-        if (!active) return;
+        if (!pollActive.current) return;
         setSync(s);
-      } catch {
-        if (!active) return;
-        setError("Failed to fetch sync status.");
-      } finally {
-        if (active) {
-          timer = window.setTimeout(poll, 1200);
+        if (pollActive.current && s.running) {
+          pollTimer.current = window.setTimeout(poll, 1200);
         }
+      } catch {
+        if (!pollActive.current) return;
+        setError("Failed to fetch sync status.");
       }
     };
     poll();
-    return () => {
-      active = false;
-      if (timer) window.clearTimeout(timer);
-    };
   }, []);
+
+  useEffect(() => {
+    pollActive.current = true;
+    startPolling();
+    return () => {
+      pollActive.current = false;
+      if (pollTimer.current) window.clearTimeout(pollTimer.current);
+    };
+  }, [startPolling]);
 
   const canStart = useMemo(() => !starting && !sync?.running, [starting, sync?.running]);
   const progress = Math.max(0, Math.min(100, sync?.progress ?? 0));
@@ -50,8 +57,7 @@ export function HomePage() {
     setStarting(true);
     try {
       await startSync();
-      const s = await getSyncStatus();
-      setSync(s);
+      startPolling();
     } catch {
       setError("Failed to start import.");
     } finally {
@@ -141,7 +147,17 @@ export function HomePage() {
               </p>
             ) : null}
             {!sync.running && sync.status === "cancelled" ? <p>Import terminated by user.</p> : null}
-            {sync.error ? <p className="error">{sync.error}</p> : null}
+            {sync.error ? (
+              <p className="error">
+                {sync.error}
+                {sync.error.includes("Browser Login") && (
+                  <>
+                    {" "}
+                    <Link to="/settings">Go to Settings</Link>
+                  </>
+                )}
+              </p>
+            ) : null}
           </div>
         ) : null}
 

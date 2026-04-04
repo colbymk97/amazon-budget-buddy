@@ -134,6 +134,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         if "actual_synced_at" not in txn_cols:
             conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_synced_at TEXT")
 
+    cred_cols = _cols("retailer_credentials")
+    if cred_cols and "cookie_jar_path" not in cred_cols:
+        conn.execute("ALTER TABLE retailer_credentials ADD COLUMN cookie_jar_path TEXT")
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS retailer_credentials (
@@ -141,6 +145,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             email TEXT NOT NULL,
             password TEXT NOT NULL,
             otp_secret TEXT,
+            cookie_jar_path TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -408,7 +413,7 @@ def summarize_retailer_status(conn: sqlite3.Connection) -> list[RetailerStatusSu
 
 def get_retailer_credentials(conn: sqlite3.Connection, retailer: str) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT retailer, email, otp_secret, created_at, updated_at FROM retailer_credentials WHERE retailer = ?",
+        "SELECT retailer, email, otp_secret, cookie_jar_path, created_at, updated_at FROM retailer_credentials WHERE retailer = ?",
         (retailer,),
     ).fetchone()
 
@@ -419,18 +424,20 @@ def upsert_retailer_credentials(
     email: str,
     password: str,
     otp_secret: str | None = None,
+    cookie_jar_path: str | None = None,
 ) -> None:
     conn.execute(
         """
-        INSERT INTO retailer_credentials (retailer, email, password, otp_secret, updated_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
+        INSERT INTO retailer_credentials (retailer, email, password, otp_secret, cookie_jar_path, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(retailer) DO UPDATE SET
             email = excluded.email,
             password = excluded.password,
             otp_secret = excluded.otp_secret,
+            cookie_jar_path = excluded.cookie_jar_path,
             updated_at = datetime('now')
         """,
-        (retailer, email, password, otp_secret),
+        (retailer, email, password, otp_secret, cookie_jar_path),
     )
     conn.commit()
 

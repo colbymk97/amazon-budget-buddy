@@ -153,6 +153,7 @@ export type CredentialsStatus = {
   configured: boolean;
   email?: string;
   has_otp_secret?: boolean;
+  cookie_jar_path?: string | null;
   updated_at?: string;
 };
 
@@ -162,7 +163,7 @@ export function getCredentials(retailer: string) {
 
 export async function saveCredentials(
   retailer: string,
-  payload: { email: string; password: string; otp_secret?: string }
+  payload: { email: string; password: string; otp_secret?: string; cookie_jar_path?: string }
 ) {
   const res = await fetch(`${API_BASE}/credentials/${retailer}`, {
     method: "POST",
@@ -180,6 +181,37 @@ export async function deleteCredentials(retailer: string) {
   const res = await fetch(`${API_BASE}/credentials/${retailer}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json() as Promise<{ deleted: boolean }>;
+}
+
+// ---------------------------------------------------------------------------
+// Browser-based Amazon authentication
+// ---------------------------------------------------------------------------
+
+export type BrowserLoginStatus = {
+  running: boolean;
+  status: string;
+  message: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+};
+
+export function getBrowserLoginStatus() {
+  return getJson<BrowserLoginStatus>("/auth/amazon/browser-login/status");
+}
+
+export async function startBrowserLogin() {
+  const res = await fetch(`${API_BASE}/auth/amazon/browser-login`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
+  }
+  return res.json() as Promise<{ started: boolean }>;
+}
+
+export async function cancelBrowserLogin() {
+  const res = await fetch(`${API_BASE}/auth/amazon/browser-login/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json() as Promise<{ cancelled: boolean }>;
 }
 
 // ---------------------------------------------------------------------------

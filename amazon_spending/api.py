@@ -83,6 +83,7 @@ class CredentialsUpsert(BaseModel):
     email: str
     password: str
     otp_secret: Optional[str] = None
+    cookie_jar_path: Optional[str] = None
 
 
 class ActualConfigUpsert(BaseModel):
@@ -218,6 +219,34 @@ def _cancel_requested() -> bool:
 # Sync job
 # ---------------------------------------------------------------------------
 
+def _try_actual_sync_after_import(new_txns: int) -> str:
+    """If Actual Budget is configured, automatically sync pending transactions.
+
+    Returns a short note string to append to the sync completion message,
+    or empty string if Actual is not configured or nothing was synced.
+    """
+    if new_txns == 0:
+        return ""
+    try:
+        from .actual_sync import load_config, sync_to_actual
+
+        conn = connect(DEFAULT_API_DB_PATH)
+        try:
+            config = load_config(conn)
+            if not config:
+                return ""
+            result = sync_to_actual(conn, config, dry_run=False)
+            if result.synced > 0:
+                return f"Synced {result.synced} transaction(s) to Actual Budget."
+            return ""
+        finally:
+            conn.close()
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Auto Actual sync failed: %s", exc)
+        return ""
+
+
 def _run_sync_job() -> None:
     _set_sync_state(
         running=True,
@@ -309,6 +338,11 @@ def _run_sync_job() -> None:
         notes = _sync_completion_note(before_order_date, new_orders, new_txns)
         if result.notes:
             notes = f"{notes} {result.notes}".strip()
+
+        # Auto-sync to Actual Budget if configured and there are new transactions.
+        actual_note = _try_actual_sync_after_import(new_txns)
+        if actual_note:
+            notes = f"{notes} {actual_note}".strip()
 
         _set_sync_state(
             running=False,
@@ -423,6 +457,7 @@ def get_credentials(retailer: str):
             "configured": True,
             "email": row["email"],
             "has_otp_secret": bool(row["otp_secret"]),
+            "cookie_jar_path": row["cookie_jar_path"] or None,
             "updated_at": row["updated_at"],
         }
     finally:
@@ -443,6 +478,7 @@ def save_credentials(retailer: str, payload: CredentialsUpsert):
             payload.email.strip(),
             payload.password,
             payload.otp_secret or None,
+            payload.cookie_jar_path.strip() or None if payload.cookie_jar_path else None,
         )
         return {"saved": True}
     finally:
@@ -457,6 +493,116 @@ def remove_credentials(retailer: str):
         return {"deleted": deleted}
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Browser-based Amazon authentication
+# ---------------------------------------------------------------------------
+
+_AUTH_LOCK = threading.Lock()
+_AUTH_STATE: dict[str, Any] = {
+    "running": False,
+    "status": "idle",  # idle | browser_open | authenticated | error | timeout | cancelled
+    "message": "",
+    "started_at": None,
+    "finished_at": None,
+}
+_AUTH_CANCEL = threading.Event()
+
+DEFAULT_COOKIE_JAR = PROJECT_ROOT / "data/cookies/amazon_cookies.json"
+DEFAULT_BROWSER_PROFILE = PROJECT_ROOT / "data/browser_profiles/amazon"
+
+
+def _set_auth_state(**kwargs: Any) -> None:
+    with _AUTH_LOCK:
+        _AUTH_STATE.update(kwargs)
+
+
+def _auth_snapshot() -> dict[str, Any]:
+    with _AUTH_LOCK:
+        return dict(_AUTH_STATE)
+
+
+def _run_browser_login() -> None:
+    from .browser_auth import browser_login_amazon
+
+    cookie_jar = str(DEFAULT_COOKIE_JAR)
+    profile = str(DEFAULT_BROWSER_PROFILE)
+
+    def on_status(msg: str) -> None:
+        _set_auth_state(message=msg)
+
+    _set_auth_state(
+        running=True,
+        status="browser_open",
+        message="Browser window opened — please log in to Amazon.",
+        started_at=_utcnow_iso(),
+        finished_at=None,
+    )
+
+    result = browser_login_amazon(
+        cookie_jar_path=cookie_jar,
+        profile_dir=profile,
+        timeout_seconds=300,
+        on_status=on_status,
+        cancel_event=_AUTH_CANCEL,
+    )
+
+    finished = _utcnow_iso()
+
+    if result.status == "ok":
+        # Persist the cookie jar path in retailer_credentials.
+        conn = connect(DEFAULT_API_DB_PATH)
+        try:
+            conn.execute(
+                "UPDATE retailer_credentials SET cookie_jar_path = ?, updated_at = datetime('now') WHERE retailer = ?",
+                (cookie_jar, "amazon"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _set_auth_state(
+        running=False,
+        status=result.status,
+        message=result.message,
+        finished_at=finished,
+    )
+
+
+@app.get("/auth/amazon/browser-login/status")
+def browser_login_status():
+    return _auth_snapshot()
+
+
+@app.post("/auth/amazon/browser-login")
+def start_browser_login():
+    snap = _auth_snapshot()
+    if snap.get("running"):
+        raise HTTPException(status_code=409, detail="Browser login already running.")
+    # Ensure credentials exist before launching browser.
+    conn = connect(DEFAULT_API_DB_PATH)
+    try:
+        row = get_retailer_credentials(conn, "amazon")
+        if not row:
+            raise HTTPException(
+                status_code=400,
+                detail="Save Amazon credentials first before using Browser Login.",
+            )
+    finally:
+        conn.close()
+
+    _AUTH_CANCEL.clear()
+    t = threading.Thread(target=_run_browser_login, daemon=True)
+    t.start()
+    return {"started": True}
+
+
+@app.post("/auth/amazon/browser-login/cancel")
+def cancel_browser_login():
+    _AUTH_CANCEL.set()
+    _set_auth_state(message="Cancellation requested...")
+    return {"cancelled": True}
 
 
 # ---------------------------------------------------------------------------
