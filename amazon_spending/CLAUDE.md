@@ -72,15 +72,25 @@ Local-first budget reconciliation tool. Two components, sharp boundary:
 | `api.py` | FastAPI server; **read-only** endpoints plus budget categorization mutations |
 | `actual_sync.py` | Optional sync to Actual Budget (`pip install -e ".[actual]"`) |
 
-### Database
+### Database and persistent state
 
-SQLite at `data/amazon_spending.sqlite3`. Key tables: `orders`, `shipments`, `order_items`, `retailer_transactions`, `order_item_transactions`, `transactions` (imported bank data), `matches`, `budget_categories`, `budget_subcategories`, `actual_budget_config`, `retailer_accounts`, `retailer_import_runs`.
+By default, the DB and Playwright profile live under the OS app-data dir:
 
-All retailer-specific tables have a `retailer` column (multi-retailer ready).
+- macOS:   `~/Library/Application Support/amazon-spending/`
+- Linux:   `~/.local/share/amazon-spending/`
+- Windows: `%APPDATA%\amazon-spending\`
+
+Inside that directory: `amazon_spending.sqlite3`, `browser_profiles/<retailer>/`, `raw/<retailer>/<timestamp>/`. The CLI can be invoked from any working directory.
+
+Set `AMAZON_SPENDING_HOME=/some/path` to override the location (useful for isolated test sandboxes or running multiple Amazon accounts side-by-side). Per-flag overrides also work: `--db`, `--user-data-dir`, `--outdir`.
+
+On the first run from a directory that has a legacy `./data/amazon_spending.sqlite3`, the CLI auto-copies the DB and browser profile into the new app-data home (non-destructive — only copies when the target DB is missing or empty).
+
+Path defaults are computed in `paths.py`. Tables: `orders`, `shipments`, `order_items`, `retailer_transactions`, `order_item_transactions`, `transactions` (imported bank data), `matches`, `budget_categories`, `budget_subcategories`, `actual_budget_config`, `retailer_accounts`, `retailer_import_runs`. All retailer-specific tables have a `retailer` column (multi-retailer ready).
 
 ### Amazon auth
 
-Playwright with a persistent Chromium profile at `data/raw/amazon/browser_profile`. First `collect` or `login` opens a headed browser for the user to sign in (CAPTCHA / 2FA handled manually). Profile cookies persist, so subsequent runs go fully headless. No credentials are stored in the database.
+Playwright with a persistent Chromium profile under the app-data dir at `browser_profiles/amazon/`. First `collect` or `login` opens a headed browser for the user to sign in (CAPTCHA / 2FA handled manually). Profile cookies persist, so subsequent runs go fully headless. No credentials are stored in the database.
 
 ### Adding a new retailer
 

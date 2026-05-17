@@ -19,6 +19,12 @@ from .db import (
 )
 from .exporter import export_reports
 from .importers import import_transactions_csv
+from .paths import (
+    default_browser_profile_dir,
+    default_exports_dir,
+    default_raw_outdir,
+    maybe_migrate_legacy_data,
+)
 from .retailers import REGISTRY
 
 VERSION = "0.1.0"
@@ -601,9 +607,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument(
         "--outdir",
         type=Path,
-        default=Path("data/exports"),
+        default=default_exports_dir(),
         metavar="PATH",
-        help="Directory to write report files into (default: data/exports)",
+        help="Directory to write report files into (default: ./exports in cwd)",
     )
     p_export.add_argument(
         "--json",
@@ -721,9 +727,9 @@ def _handle_db_status(args: argparse.Namespace, conn) -> None:
 def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
     collector = REGISTRY[retailer_id]
 
-    # Retailer-namespaced defaults for outdir and user-data-dir
-    outdir = args.outdir or Path(f"data/raw/{retailer_id}")
-    user_data_dir = args.user_data_dir or Path(f"data/raw/{retailer_id}/browser_profile")
+    # Retailer-namespaced defaults for outdir and user-data-dir (under app data dir).
+    outdir = args.outdir or default_raw_outdir(retailer_id)
+    user_data_dir = args.user_data_dir or default_browser_profile_dir(retailer_id)
 
     # --saved-run-dir implies --test-run
     test_run = args.test_run or (args.saved_run_dir is not None)
@@ -828,7 +834,7 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
 
 def _handle_login(args: argparse.Namespace, conn) -> None:
     collector = REGISTRY[args.retailer]
-    user_data_dir = args.user_data_dir or Path(f"data/raw/{args.retailer}/browser_profile")
+    user_data_dir = args.user_data_dir or default_browser_profile_dir(args.retailer)
 
     try:
         result = collector.login(
@@ -973,8 +979,8 @@ def _handle_audit(args: argparse.Namespace, conn, mode: str) -> None:
     from .audit import audit_amazon
 
     retailer_id = getattr(args, "retailer", "amazon")
-    outdir = Path(f"data/raw/{retailer_id}")
-    user_data_dir = args.user_data_dir or Path(f"data/raw/{retailer_id}/browser_profile")
+    outdir = default_raw_outdir(retailer_id)
+    user_data_dir = args.user_data_dir or default_browser_profile_dir(retailer_id)
 
     result = audit_amazon(
         conn=conn,
@@ -1123,6 +1129,11 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+
+    # Copy legacy ./data/ files into the app-data home the first time we run
+    # from a project directory. No-op once migrated or when run elsewhere.
+    if args.db == DEFAULT_DB_PATH:
+        maybe_migrate_legacy_data()
 
     conn = connect(args.db)
     try:

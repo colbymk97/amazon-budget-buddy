@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import sqlite3
-from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
@@ -12,9 +11,9 @@ from pydantic import BaseModel
 
 from .db import connect, db_status_payload, init_db
 from .exporter import export_reports
+from .paths import default_db_path, default_exports_dir, maybe_migrate_legacy_data
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_API_DB_PATH = PROJECT_ROOT / "data/amazon_spending.sqlite3"
+DEFAULT_API_DB_PATH = default_db_path()
 
 app = FastAPI(title="Budget Buddy API", version="0.3.0")
 app.add_middleware(
@@ -108,6 +107,7 @@ def _load_transaction_with_budget(conn, retailer_txn_id: str) -> dict[str, Any]:
 
 
 def _ensure_api_db_schema() -> None:
+    maybe_migrate_legacy_data()
     conn = connect(DEFAULT_API_DB_PATH)
     try:
         init_db(conn)
@@ -653,7 +653,7 @@ def item_transactions(item_id: str):
 def export_csv():
     conn = connect(DEFAULT_API_DB_PATH)
     try:
-        outdir = PROJECT_ROOT / "data" / "exports"
+        outdir = default_exports_dir()
         paths = export_reports(conn, outdir)
     finally:
         conn.close()

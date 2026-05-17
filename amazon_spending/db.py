@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-DEFAULT_DB_PATH = Path("data/amazon_spending.sqlite3")
+from .paths import default_db_path
+
+DEFAULT_DB_PATH = default_db_path()
 
 
 @dataclass
