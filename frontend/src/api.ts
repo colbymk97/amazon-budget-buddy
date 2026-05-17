@@ -23,6 +23,10 @@ export function formatMoney(cents: number | null | undefined): string {
   return value.toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
+// ---------------------------------------------------------------------------
+// Orders / Transactions / Items (read-only)
+// ---------------------------------------------------------------------------
+
 export function listOrders(params: {
   search?: string;
   start_date?: string;
@@ -81,42 +85,32 @@ export function getItemTransactions(itemId: string) {
   return getJson<RowsResponse<RetailerTransaction>>(`/items/${itemId}/transactions`);
 }
 
+// ---------------------------------------------------------------------------
+// Health / DB status
+// ---------------------------------------------------------------------------
+
 export function getHealth() {
   return getJson<{ status: string }>(`/health`);
 }
 
-export type SyncStatus = {
-  running: boolean;
-  cancel_requested?: boolean;
-  progress: number;
-  stage: string;
-  started_at?: string | null;
-  finished_at?: string | null;
-  last_order_date?: string | null;
-  last_transaction_date?: string | null;
-  new_transactions_added?: number;
-  new_orders_added?: number;
-  sync_since_date?: string | null;
-  status?: string;
-  notes?: string;
-  error?: string | null;
+export type DbRetailerStatus = {
+  retailer: string;
+  orders: number;
+  transactions: number;
+  first_order_date: string | null;
+  latest_order_date: string | null;
+  last_import_finished_at: string | null;
+  last_import_status: string | null;
+  bound_account: string | null;
 };
 
-export function getSyncStatus() {
-  return getJson<SyncStatus>(`/sync/status`);
+export function getDbStatus() {
+  return getJson<{ retailers: DbRetailerStatus[] }>(`/db/status`);
 }
 
-export async function startSync() {
-  const res = await fetch(`${API_BASE}/sync/start`, { method: "POST" });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<{ started: boolean; message: string }>;
-}
-
-export async function cancelSync() {
-  const res = await fetch(`${API_BASE}/sync/cancel`, { method: "POST" });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<{ cancelled: boolean; message: string }>;
-}
+// ---------------------------------------------------------------------------
+// Budget categorization (analytical UI feature — kept on the web)
+// ---------------------------------------------------------------------------
 
 export async function assignTransactionBudget(
   txnId: string,
@@ -145,163 +139,6 @@ export async function createBudgetCategory(payload: { name: string; description?
   return res.json() as Promise<BudgetCategory>;
 }
 
-// ---------------------------------------------------------------------------
-// Credentials
-// ---------------------------------------------------------------------------
-
-export type CredentialsStatus = {
-  configured: boolean;
-  email?: string;
-  has_otp_secret?: boolean;
-  cookie_jar_path?: string | null;
-  updated_at?: string;
-};
-
-export function getCredentials(retailer: string) {
-  return getJson<CredentialsStatus>(`/credentials/${retailer}`);
-}
-
-export async function saveCredentials(
-  retailer: string,
-  payload: { email: string; password: string; otp_secret?: string; cookie_jar_path?: string }
-) {
-  const res = await fetch(`${API_BASE}/credentials/${retailer}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
-  }
-  return res.json() as Promise<{ saved: boolean }>;
-}
-
-export async function deleteCredentials(retailer: string) {
-  const res = await fetch(`${API_BASE}/credentials/${retailer}`, { method: "DELETE" });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<{ deleted: boolean }>;
-}
-
-// ---------------------------------------------------------------------------
-// Browser-based Amazon authentication
-// ---------------------------------------------------------------------------
-
-export type BrowserLoginStatus = {
-  running: boolean;
-  status: string;
-  message: string;
-  started_at?: string | null;
-  finished_at?: string | null;
-};
-
-export function getBrowserLoginStatus() {
-  return getJson<BrowserLoginStatus>("/auth/amazon/browser-login/status");
-}
-
-export async function startBrowserLogin() {
-  const res = await fetch(`${API_BASE}/auth/amazon/browser-login`, { method: "POST" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
-  }
-  return res.json() as Promise<{ started: boolean }>;
-}
-
-export async function cancelBrowserLogin() {
-  const res = await fetch(`${API_BASE}/auth/amazon/browser-login/cancel`, { method: "POST" });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<{ cancelled: boolean }>;
-}
-
-// ---------------------------------------------------------------------------
-// Actual Budget config
-// ---------------------------------------------------------------------------
-
-export type ActualStatus = {
-  configured: boolean;
-  base_url?: string;
-  file?: string;
-  account_name?: string;
-  pending?: number;
-};
-
-export function getActualStatus() {
-  return getJson<ActualStatus>(`/actual/status`);
-}
-
-export async function saveActualConfig(payload: {
-  base_url: string;
-  password: string;
-  file: string;
-  account_name?: string;
-}) {
-  const res = await fetch(`${API_BASE}/actual/configure`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
-  }
-  return res.json() as Promise<{ saved: boolean }>;
-}
-
-export async function deleteActualConfig() {
-  const res = await fetch(`${API_BASE}/actual/configure`, { method: "DELETE" });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<{ deleted: boolean }>;
-}
-
-export async function runActualSync(dry_run = false) {
-  const res = await fetch(`${API_BASE}/actual/sync?dry_run=${dry_run}`, { method: "POST" });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
-  }
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// CSV import / export
-// ---------------------------------------------------------------------------
-
-export async function importTransactionsCsv(file: File, account_id?: string) {
-  const form = new FormData();
-  form.append("file", file);
-  const url = `${API_BASE}/import/transactions${account_id ? `?account_id=${encodeURIComponent(account_id)}` : ""}`;
-  const res = await fetch(url, { method: "POST", body: form });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error((err as { detail?: string }).detail ?? `API ${res.status}`);
-  }
-  return res.json() as Promise<{ imported: number }>;
-}
-
-export function getExportUrl() {
-  return `${API_BASE}/export/csv`;
-}
-
-// ---------------------------------------------------------------------------
-// DB status
-// ---------------------------------------------------------------------------
-
-export type DbRetailerStatus = {
-  retailer: string;
-  orders: number;
-  transactions: number;
-  first_order_date: string | null;
-  latest_order_date: string | null;
-  last_import_finished_at: string | null;
-  last_import_status: string | null;
-  bound_account: string | null;
-};
-
-export function getDbStatus() {
-  return getJson<{ retailers: DbRetailerStatus[] }>(`/db/status`);
-}
-
 export function listBudgetSubcategories(category_id?: number) {
   const q = toQuery({ category_id });
   return getJson<RowsResponse<BudgetSubcategory>>(`/budget/subcategories${q ? `?${q}` : ""}`);
@@ -319,4 +156,12 @@ export async function createBudgetSubcategory(payload: {
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
   return res.json() as Promise<BudgetSubcategory>;
+}
+
+// ---------------------------------------------------------------------------
+// CSV export (download)
+// ---------------------------------------------------------------------------
+
+export function getExportUrl() {
+  return `${API_BASE}/export/csv`;
 }

@@ -1,13 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
-import { cancelSync, getDbStatus, getHealth, getSyncStatus, startSync, type DbRetailerStatus, type SyncStatus } from "../api";
+import { useEffect, useState } from "react";
+import { getDbStatus, getHealth, type DbRetailerStatus } from "../api";
 
 export function HomePage() {
   const [status, setStatus] = useState<string>("loading");
-  const [sync, setSync] = useState<SyncStatus | null>(null);
   const [dbStats, setDbStats] = useState<DbRetailerStatus[] | null>(null);
-  const [starting, setStarting] = useState(false);
-  const [error, setError] = useState("");
 
   useEffect(() => {
     getHealth()
@@ -18,150 +14,35 @@ export function HomePage() {
       .catch(() => setDbStats([]));
   }, []);
 
-  const pollTimer = useRef<number | null>(null);
-  const pollActive = useRef(true);
-
-  const startPolling = useCallback(() => {
-    if (pollTimer.current) window.clearTimeout(pollTimer.current);
-
-    const poll = async () => {
-      try {
-        const s = await getSyncStatus();
-        if (!pollActive.current) return;
-        setSync(s);
-        if (pollActive.current && s.running) {
-          pollTimer.current = window.setTimeout(poll, 1200);
-        }
-      } catch {
-        if (!pollActive.current) return;
-        setError("Failed to fetch sync status.");
-      }
-    };
-    poll();
-  }, []);
-
-  useEffect(() => {
-    pollActive.current = true;
-    startPolling();
-    return () => {
-      pollActive.current = false;
-      if (pollTimer.current) window.clearTimeout(pollTimer.current);
-    };
-  }, [startPolling]);
-
-  const canStart = useMemo(() => !starting && !sync?.running, [starting, sync?.running]);
-  const progress = Math.max(0, Math.min(100, sync?.progress ?? 0));
-
-  const onStartSync = async () => {
-    setError("");
-    setStarting(true);
-    try {
-      await startSync();
-      startPolling();
-    } catch {
-      setError("Failed to start import.");
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const onCancelSync = async () => {
-    setError("");
-    try {
-      await cancelSync();
-      const s = await getSyncStatus();
-      setSync(s);
-    } catch {
-      setError("Failed to request cancellation.");
-    }
-  };
+  const totalOrders = (dbStats ?? []).reduce((sum, r) => sum + r.orders, 0);
+  const totalTransactions = (dbStats ?? []).reduce((sum, r) => sum + r.transactions, 0);
+  const latestOrderDate = (dbStats ?? [])
+    .map((r) => r.latest_order_date)
+    .filter((d): d is string => !!d)
+    .sort()
+    .pop();
+  const latestImport = (dbStats ?? [])
+    .map((r) => r.last_import_finished_at)
+    .filter((d): d is string => !!d)
+    .sort()
+    .pop();
 
   return (
     <section className="dashboard-grid">
       <article className="panel hero-panel">
         <div className="hero-copy">
-          <p className="eyebrow">Command Center</p>
-          <h2>Control imports without leaving the dashboard.</h2>
+          <p className="eyebrow">Dashboard</p>
+          <h2>A read-only window into your local SQLite database.</h2>
           <p className="muted">
-            The new shell emphasizes status visibility, room for new modules, and a steadier visual rhythm for
-            everyday use.
+            Imports happen from the CLI (<code>amazon-spending import</code>). This site renders
+            whatever is already in the database — orders, items, transactions, and budget categorization.
           </p>
         </div>
 
         <div className="hero-status">
           <div className={`status-pill ${status === "ok" ? "good" : "warn"}`}>API {status}</div>
-          <div className={`status-pill ${sync?.running ? "info" : "neutral"}`}>
-            {sync?.running ? "Import active" : "Importer idle"}
-          </div>
-          <div className="status-pill neutral">Stage {sync?.stage ?? "waiting"}</div>
+          <div className="status-pill neutral">Read-only viewer</div>
         </div>
-
-        <div className="sync-actions">
-          <button disabled={!canStart} onClick={onStartSync}>
-            {starting ? "Starting..." : sync?.running ? "Import Running..." : "Import New Data"}
-          </button>
-          <button disabled={!sync?.running} onClick={onCancelSync}>
-            Terminate Import
-          </button>
-          {sync?.running ? <span className="muted">Importing in background...</span> : null}
-        </div>
-
-        {sync ? (
-          <div className="sync-progress">
-            <div className="progress-labels">
-              <span>{sync.stage}</span>
-              <strong>{progress}%</strong>
-            </div>
-            <progress value={progress} max={100} />
-            {sync.cancel_requested ? <p className="muted">Cancellation requested...</p> : null}
-            <p className="muted">{sync.notes ?? ""}</p>
-            {!sync.running && (sync.new_transactions_added ?? 0) > 0 ? (
-              <p>
-                Added <strong>{sync.new_transactions_added}</strong> new transaction(s).
-              </p>
-            ) : null}
-            {!sync.running && (sync.new_orders_added ?? 0) > 0 ? (
-              <p>
-                Found <strong>{sync.new_orders_added}</strong> order(s)
-                {sync.sync_since_date ? (
-                  <>
-                    {" "}
-                    since <strong>{sync.sync_since_date}</strong>
-                  </>
-                ) : null}
-                .
-              </p>
-            ) : null}
-            {!sync.running && (sync.new_transactions_added ?? 0) === 0 && sync.status === "ok" ? (
-              <p>
-                No new orders were found
-                {sync.sync_since_date ? (
-                  <>
-                    {" "}
-                    since <strong>{sync.sync_since_date}</strong>
-                  </>
-                ) : (
-                  " since the last import"
-                )}
-                .
-              </p>
-            ) : null}
-            {!sync.running && sync.status === "cancelled" ? <p>Import terminated by user.</p> : null}
-            {sync.error ? (
-              <p className="error">
-                {sync.error}
-                {sync.error.includes("Browser Login") && (
-                  <>
-                    {" "}
-                    <Link to="/settings">Go to Settings</Link>
-                  </>
-                )}
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-
-        {error ? <p className="error">{error}</p> : null}
       </article>
 
       {dbStats && dbStats.length > 0 && (
@@ -206,21 +87,29 @@ export function HomePage() {
 
       <div className="dashboard-stats">
         <article className="panel stat-card">
-          <p className="eyebrow">API</p>
-          <p className="stat-value">{status}</p>
-          <p className="muted">Backend health check</p>
+          <p className="eyebrow">Orders</p>
+          <p className="stat-value">{totalOrders.toLocaleString()}</p>
+          <p className="muted">Total across retailers</p>
         </article>
 
         <article className="panel stat-card">
-          <p className="eyebrow">Latest Orders</p>
-          <p className="stat-value">{sync?.last_order_date ?? "n/a"}</p>
+          <p className="eyebrow">Transactions</p>
+          <p className="stat-value">{totalTransactions.toLocaleString()}</p>
+          <p className="muted">Retailer payment events</p>
+        </article>
+
+        <article className="panel stat-card">
+          <p className="eyebrow">Latest Order</p>
+          <p className="stat-value">{latestOrderDate ?? "n/a"}</p>
           <p className="muted">Most recent order date</p>
         </article>
 
         <article className="panel stat-card">
-          <p className="eyebrow">Latest Transactions</p>
-          <p className="stat-value">{sync?.last_transaction_date ?? "n/a"}</p>
-          <p className="muted">Most recent transaction date</p>
+          <p className="eyebrow">Last Import</p>
+          <p className="stat-value">
+            {latestImport ? new Date(latestImport).toLocaleDateString() : "n/a"}
+          </p>
+          <p className="muted">Most recent CLI run</p>
         </article>
       </div>
     </section>

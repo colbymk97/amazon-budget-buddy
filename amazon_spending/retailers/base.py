@@ -16,6 +16,9 @@ class CollectResult:
     orders_inserted: int = 0
     orders_updated: int = 0
     orders_unchanged: int = 0
+    shipments_inserted: int = 0
+    shipments_updated: int = 0
+    shipments_unchanged: int = 0
     items_inserted: int = 0
     items_updated: int = 0
     items_unchanged: int = 0
@@ -25,6 +28,7 @@ class CollectResult:
     amazon_txns_unchanged: int = 0
     amazon_txns_deleted: int = 0
     item_txn_links_written: int = 0
+    listing_pages_scanned: int = 0
     discovered_orders: int = 0
     known_orders_matched: int = 0
 

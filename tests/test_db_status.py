@@ -47,22 +47,15 @@ class DbStatusTests(unittest.TestCase):
 
         payload = db_status_payload(self.conn)
 
-        self.assertEqual(
-            payload,
-            {
-                "retailers": [
-                    {
-                        "retailer": "amazon",
-                        "orders": 1,
-                        "transactions": 1,
-                        "last_import_finished_at": payload["retailers"][0]["last_import_finished_at"],
-                        "last_import_status": "ok",
-                        "bound_account": "Colby",
-                    }
-                ]
-            },
-        )
-        self.assertIsNotNone(payload["retailers"][0]["last_import_finished_at"])
+        retailer = payload["retailers"][0]
+        self.assertEqual(retailer["retailer"], "amazon")
+        self.assertEqual(retailer["orders"], 1)
+        self.assertEqual(retailer["transactions"], 1)
+        self.assertEqual(retailer["first_order_date"], "2026-03-01")
+        self.assertEqual(retailer["latest_order_date"], "2026-03-01")
+        self.assertEqual(retailer["last_import_status"], "ok")
+        self.assertEqual(retailer["bound_account"], "Colby")
+        self.assertIsNotNone(retailer["last_import_finished_at"])
 
 
 if __name__ == "__main__":

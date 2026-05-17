@@ -8,20 +8,18 @@ import { TransactionDetailPage } from "./pages/TransactionDetailPage";
 import { ItemDetailPage } from "./pages/ItemDetailPage";
 import { BabySisterPage } from "./pages/BabySisterPage";
 import { ReportsPage } from "./pages/ReportsPage";
-import { SettingsPage } from "./pages/SettingsPage";
 
 const navItems = [
-  { to: "/", label: "Dashboard", meta: "Sync and health" },
+  { to: "/", label: "Dashboard", meta: "Database overview" },
   { to: "/orders", label: "Orders", meta: "Purchases ledger" },
   { to: "/transactions", label: "Transactions", meta: "Payment events" },
   { to: "/items", label: "Items", meta: "Line-item detail" },
   { to: "/reports", label: "Reports", meta: "Monthly analytics" },
-  { to: "/settings", label: "Settings", meta: "Auth & integrations" },
   { to: "/baby-sister", label: "Baby Sister", meta: "Bonus screen" }
 ] as const;
 
 function sectionTitle(pathname: string): string {
-  if (pathname === "/") return "Command Center";
+  if (pathname === "/") return "Dashboard";
   const match = navItems.find((item) => pathname === item.to || pathname.startsWith(`${item.to}/`));
   return match?.label ?? "Amazon Spending";
 }
@@ -82,7 +80,6 @@ export function App() {
             <Route path="/items" element={<ItemsPage />} />
             <Route path="/items/:itemId" element={<ItemDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
             <Route path="/baby-sister" element={<BabySisterPage />} />
           </Routes>
         </main>
