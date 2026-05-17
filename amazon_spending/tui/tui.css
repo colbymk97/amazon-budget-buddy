@@ -1,0 +1,143 @@
+Screen {
+    background: $surface;
+}
+
+#main {
+    height: 1fr;
+}
+
+#sidebar {
+    width: 28;
+    background: $panel;
+    border-right: solid $primary-background;
+    padding: 1 1 0 1;
+}
+
+#brand {
+    text-style: bold;
+    color: $accent;
+    padding-bottom: 0;
+}
+
+#brand-db {
+    color: $text-muted;
+    padding-bottom: 1;
+}
+
+#nav {
+    background: transparent;
+}
+
+#nav > ListItem {
+    padding: 0 1;
+}
+
+#nav > ListItem.--highlight {
+    background: $accent 30%;
+}
+
+#content {
+    width: 1fr;
+    padding: 1 2;
+}
+
+#dashboard-title,
+#commands-title {
+    text-style: bold;
+    color: $accent;
+    padding-bottom: 1;
+}
+
+#dashboard-summary,
+#orders-status,
+#txns-status,
+#items-status {
+    padding-top: 1;
+    color: $text-muted;
+}
+
+.modal-section {
+    text-style: bold;
+    color: $accent;
+    padding-top: 1;
+}
+
+#orders-filters,
+#txns-filters,
+#items-filters {
+    height: 3;
+    padding-bottom: 1;
+}
+
+#orders-filters > Input,
+#txns-filters > Input,
+#items-filters > Input {
+    margin-right: 1;
+}
+
+.date-input {
+    width: 22;
+}
+
+#reports-controls {
+    height: 3;
+    padding-bottom: 1;
+}
+
+#reports-controls > Static {
+    width: 8;
+    content-align: left middle;
+}
+
+.reports-label {
+    color: $text-muted;
+}
+
+#reports-metrics {
+    padding: 1 0;
+}
+
+#commands-toggles {
+    height: 3;
+    padding-bottom: 1;
+}
+
+#commands-buttons {
+    height: 3;
+    padding-bottom: 1;
+}
+
+#commands-buttons > Button {
+    margin-right: 1;
+}
+
+#commands-state {
+    padding: 0 0 1 0;
+}
+
+#commands-log {
+    border: round $primary-background;
+    height: 1fr;
+}
+
+OrderDetailModal {
+    align: center middle;
+}
+
+#order-modal {
+    background: $panel;
+    border: thick $accent;
+    width: 90%;
+    height: 80%;
+    padding: 1 2;
+}
+
+#order-modal-header {
+    text-style: bold;
+    padding-bottom: 1;
+}
+
+#order-modal-footer {
+    color: $text-muted;
+    padding-top: 1;
+}

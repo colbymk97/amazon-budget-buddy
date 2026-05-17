@@ -694,6 +694,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print results as a JSON object instead of plain text",
     )
 
+    # --------------------------------------------------------------------- tui
+    sub.add_parser(
+        "tui",
+        help="Launch the interactive Textual UI",
+        description=(
+            "Opens the Textual TUI for browsing the local SQLite database\n"
+            "and running commands (login, collect, actual-sync, export) with\n"
+            "live output. The TUI is a thin layer over this CLI — every\n"
+            "subcommand it triggers can also be run directly from a shell."
+        ),
+        formatter_class=_Formatter,
+    )
+
     return parser
 
 
@@ -1164,6 +1177,14 @@ def main() -> None:
             _handle_audit(args, conn, "full")
         elif args.command == "from-latest-transaction":
             _handle_audit(args, conn, "latest")
+        elif args.command == "tui":
+            # Close the outer conn first; the TUI manages its own short-lived
+            # read connections, and we don't want to hold one open for the
+            # whole interactive session.
+            conn.close()
+            from .tui import run_tui
+            run_tui(args.db)
+            return
         else:
             parser.error(f"Unknown command: {args.command}")
     finally:
