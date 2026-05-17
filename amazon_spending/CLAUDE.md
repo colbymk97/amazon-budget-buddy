@@ -107,5 +107,5 @@ Playwright with a persistent Chromium profile under the app-data dir at `browser
 
 - Line length: 120 (ruff)
 - Ruff rules: E, F (ignoring E501, E402, F401)
-- Mypy target: Python 3.12
+- Mypy target: Python 3.13
 - Pytest testpaths: `tests/`
