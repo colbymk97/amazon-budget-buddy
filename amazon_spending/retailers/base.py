@@ -124,6 +124,8 @@ class RetailerCollector(ABC):
         stop_when_before_start_date: bool = False,
         known_order_ids: list[str] | None = None,
         overlap_match_threshold: int = 1,
+        save_raw: str = "always",
+        raw_retention_runs: int | None = None,
     ) -> CollectResult:
         """Scrape orders for this retailer and reconcile into the DB.
 
@@ -144,6 +146,8 @@ class RetailerCollector(ABC):
                 than start_date.
             known_order_ids: Recently seen order IDs; used for incremental stop logic.
             overlap_match_threshold: Minimum known-ID hits before stopping scan.
+            save_raw: Raw HTML snapshot policy: "always", "on-error", or "never".
+            raw_retention_runs: If set, keep only this many timestamped raw snapshot runs.
 
         Returns:
             CollectResult with counts of collected and reconciled records.

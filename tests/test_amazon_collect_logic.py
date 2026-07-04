@@ -104,6 +104,34 @@ class AmazonCollectLogicTests(unittest.TestCase):
         self.assertEqual(matched_known, {"222-2222222-2222222"})
         self.assertTrue(stop_after_known)
 
+    def test_merge_listing_orders_can_require_multiple_known_orders(self) -> None:
+        current_orders = [
+            ListingOrderSummary("111-1111111-1111111", "2026-02-28"),
+            ListingOrderSummary("222-2222222-2222222", "2026-02-20"),
+            ListingOrderSummary("333-3333333-3333333", "2026-02-10"),
+            ListingOrderSummary("444-4444444-4444444", "2026-02-08"),
+            ListingOrderSummary("555-5555555-5555555", "2026-02-06"),
+        ]
+
+        collected, matched_known, stop_after_known = _merge_listing_orders(
+            current_orders,
+            seen_orders=set(),
+            known_order_id_set={"222-2222222-2222222", "444-4444444-4444444"},
+            collected_orders=[],
+            order_limit=None,
+            overlap_match_threshold=2,
+        )
+
+        self.assertEqual(
+            collected,
+            [
+                ListingOrderSummary("111-1111111-1111111", "2026-02-28"),
+                ListingOrderSummary("333-3333333-3333333", "2026-02-10"),
+            ],
+        )
+        self.assertEqual(matched_known, {"222-2222222-2222222", "444-4444444-4444444"})
+        self.assertTrue(stop_after_known)
+
     def test_listing_date_can_skip_detail_fetch(self) -> None:
         self.assertTrue(
             _should_skip_detail_fetch(

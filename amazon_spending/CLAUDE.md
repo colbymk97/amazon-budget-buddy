@@ -14,7 +14,6 @@ playwright install chromium
 # Run CLI
 amazon-spending init-db
 amazon-spending collect --retailer amazon
-amazon-spending import-transactions --csv PATH
 amazon-spending db-status
 
 # API server
@@ -41,14 +40,12 @@ npm run lint
 
 ## Architecture
 
-This is a **local-first budget reconciliation tool** that scrapes retailer order history into SQLite and matches it against imported bank/card transactions. No cloud services required.
+This is a **local-first budget reconciliation tool** that scrapes retailer order history into SQLite and syncs it to Actual Budget. No cloud services required.
 
 ### Data flow
 
-1. `collect` → Playwright scrapes retailer orders → stored in SQLite
-2. `import-transactions` → CSV bank statements → stored in SQLite
-3. `matcher.py` → matches bank transactions to orders/shipments by amount + date
-4. `export` → CSV reconciliation reports; or browse via React UI + FastAPI
+1. `collect` → Playwright scrapes retailer orders and their per-charge transactions → stored in SQLite (`orders`, `retailer_transactions`)
+2. `actual-sync` → matches `retailer_transactions` against Actual Budget's own transactions by amount + date, appends order/item notes; browse everything via React UI + FastAPI
 
 ### Key modules
 
@@ -59,14 +56,12 @@ This is a **local-first budget reconciliation tool** that scrapes retailer order
 | `retailers/__init__.py` | `REGISTRY` dict mapping retailer name → collector class |
 | `db.py` | SQLite connection, schema migrations (`_migrate_to_multi_retailer`) |
 | `sql/schema.sql` | Source of truth for table DDL |
-| `matcher.py` | Amount+date matching; confidence scoring |
-| `importers.py` | CSV transaction import with upsert logic |
 | `api.py` | FastAPI server; CORS for React frontend; thread-safe sync jobs |
 | `actual_sync.py` | Optional sync to Actual Budget (`pip install -e ".[actual]"`) |
 
 ### Database
 
-SQLite at `data/amazon_spending.sqlite3` (configurable). Key tables: `orders`, `shipments`, `order_items`, `retailer_transactions`, `transactions` (imported bank data), `matches`, `budget_categories`, `budget_subcategories`, `actual_budget_config`, `import_runs`.
+SQLite at `data/amazon_spending.sqlite3` (configurable). Key tables: `orders`, `shipments`, `order_items`, `retailer_transactions` (per-charge Amazon transaction data), `budget_categories`, `budget_subcategories`, `actual_budget_config`, `retailer_import_runs`.
 
 All tables with retailer-specific data have a `retailer` column (multi-retailer migration handles legacy Amazon-only databases).
 

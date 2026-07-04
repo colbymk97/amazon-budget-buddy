@@ -55,6 +55,8 @@ class DbStatusTests(unittest.TestCase):
                         "retailer": "amazon",
                         "orders": 1,
                         "transactions": 1,
+                        "first_order_date": "2026-03-01",
+                        "latest_order_date": "2026-03-01",
                         "last_import_finished_at": payload["retailers"][0]["last_import_finished_at"],
                         "last_import_status": "ok",
                         "bound_account": "Colby",

@@ -29,6 +29,10 @@ For each retailer transaction that has not yet been synced:
 4.  ``retailer_transactions.actual_synced_at`` is set to the current UTC
     timestamp so the transaction is never re-synced.
 
+Rows that clearly do not represent imported bank or card activity are marked
+with ``actual_skipped_at`` and ``actual_skip_reason`` so future runs focus on
+real ledger-backed transactions.
+
 Set ``dry_run=True`` to preview matches without writing anything.
 """
 from __future__ import annotations
@@ -164,22 +168,64 @@ class MissedRow:
 
 
 @dataclass
+class SkippedRow:
+    retailer_txn_id: str
+    order_id: str
+    txn_date: str
+    amount_cents: int
+    reason: str
+
+
+@dataclass
+class RefreshedRow:
+    retailer_txn_id: str
+    order_id: str
+    txn_date: str
+    amount_cents: int
+
+
+@dataclass
 class SyncResult:
     synced: int = 0
+    refreshed: int = 0
+    skipped: int = 0
     no_match: int = 0
     errors: list[str] = field(default_factory=list)
     synced_rows: list[SyncedRow] = field(default_factory=list)
+    refreshed_rows: list[RefreshedRow] = field(default_factory=list)
+    skipped_rows: list[SkippedRow] = field(default_factory=list)
     missed_rows: list[MissedRow] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "synced": self.synced,
+            "refreshed": self.refreshed,
+            "skipped": self.skipped,
             "no_match": self.no_match,
             "errors": self.errors,
             "synced_rows": [
                 {"retailer_txn_id": r.retailer_txn_id, "order_id": r.order_id,
                  "txn_date": r.txn_date, "amount_cents": r.amount_cents}
                 for r in self.synced_rows
+            ],
+            "refreshed_rows": [
+                {
+                    "retailer_txn_id": r.retailer_txn_id,
+                    "order_id": r.order_id,
+                    "txn_date": r.txn_date,
+                    "amount_cents": r.amount_cents,
+                }
+                for r in self.refreshed_rows
+            ],
+            "skipped_rows": [
+                {
+                    "retailer_txn_id": r.retailer_txn_id,
+                    "order_id": r.order_id,
+                    "txn_date": r.txn_date,
+                    "amount_cents": r.amount_cents,
+                    "reason": r.reason,
+                }
+                for r in self.skipped_rows
             ],
             "missed_rows": [
                 {"retailer_txn_id": r.retailer_txn_id, "order_id": r.order_id,
@@ -189,10 +235,43 @@ class SyncResult:
         }
 
 
+def _skip_reason(row: sqlite3.Row) -> str | None:
+    raw_label = (row["raw_label"] or "").strip().lower()
+    payment_last4 = (row["payment_last4"] or "").strip()
+    transaction_tag = (row["transaction_tag"] or "").strip()
+
+    if raw_label.startswith("fallback_"):
+        return "synthetic fallback row"
+    if raw_label == "amazon gift card":
+        return "gift card funded order"
+    if raw_label == "amazon visa points":
+        return "points-funded offset"
+    if raw_label == "order" and not payment_last4 and not transaction_tag:
+        return "summary order row without payment metadata"
+    return None
+
+
+def _merge_note(existing: str | None, amazon_block: str) -> str:
+    existing_text = (existing or "").strip()
+    if not existing_text:
+        return amazon_block
+
+    marker = "Amazon Order:"
+    if marker not in existing_text:
+        return f"{existing_text}\n{amazon_block}".strip()
+
+    prefix, _, _ = existing_text.partition(marker)
+    prefix = prefix.rstrip()
+    if not prefix:
+        return amazon_block
+    return f"{prefix}\n{amazon_block}".strip()
+
+
 def sync_to_actual(
     db_conn: sqlite3.Connection,
     config: ActualConfig,
     dry_run: bool = False,
+    refresh_notes: bool = False,
 ) -> SyncResult:
     """Sync unsynced retailer transactions to Actual Budget.
 
@@ -221,18 +300,27 @@ def sync_to_actual(
             " (or: pip install \"amazon-spending[actual]\")"
         ) from exc
 
+    where_clause = """
+        actual_skipped_at IS NULL
+        AND txn_date IS NOT NULL
+        AND amount_cents IS NOT NULL
+    """
+    if not refresh_notes:
+        where_clause += "\n        AND actual_synced_at IS NULL"
+
     pending = db_conn.execute(
-        """
-        SELECT retailer_txn_id, txn_date, amount_cents, order_id
+        f"""
+        SELECT retailer_txn_id, txn_date, amount_cents, order_id, raw_label, payment_last4, transaction_tag, actual_synced_at
         FROM retailer_transactions
-        WHERE actual_synced_at IS NULL
-          AND txn_date IS NOT NULL
-          AND amount_cents IS NOT NULL
+        WHERE {where_clause}
         ORDER BY txn_date
         """
     ).fetchall()
 
     result = SyncResult()
+    synced_ids: list[str] = []
+    skipped_updates: list[tuple[str, str]] = []
+    note_updates_needed = False
 
     with Actual(
         base_url=config.base_url,
@@ -248,6 +336,22 @@ def sync_to_actual(
                 txn_date = date.fromisoformat(row["txn_date"])
             except (ValueError, TypeError):
                 result.errors.append(f"{txn_id}: invalid date {row['txn_date']!r}")
+                continue
+
+            skip_reason = _skip_reason(row)
+            if skip_reason:
+                result.skipped += 1
+                result.skipped_rows.append(
+                    SkippedRow(
+                        retailer_txn_id=txn_id,
+                        order_id=order_id,
+                        txn_date=str(txn_date),
+                        amount_cents=amount_cents,
+                        reason=skip_reason,
+                    )
+                )
+                if not dry_run:
+                    skipped_updates.append((skip_reason, txn_id))
                 continue
 
             # Load items allocated to this transaction (may be empty if
@@ -299,31 +403,63 @@ def sync_to_actual(
                 ))
                 continue
 
-            best = matches[0]
+            order_matches = [
+                t for t in matches
+                if order_id in ((t.notes or ""))
+            ]
+            best = order_matches[0] if order_matches else matches[0]
+            existing_note = (best.notes or "").strip()
+            merged_note = _merge_note(best.notes, note)
+            note_changed = merged_note != existing_note
 
             if not dry_run:
-                existing = (best.notes or "").strip()
-                best.notes = f"{existing}\n{note}".strip() if existing else note
+                if note_changed:
+                    best.notes = merged_note
+                    note_updates_needed = True
+            if row["actual_synced_at"] is None:
+                synced_ids.append(txn_id)
+            elif note_changed:
+                result.refreshed += 1
+                result.refreshed_rows.append(RefreshedRow(
+                    retailer_txn_id=txn_id,
+                    order_id=order_id,
+                    txn_date=str(txn_date),
+                    amount_cents=amount_cents,
+                ))
 
-                db_conn.execute(
-                    """
-                    UPDATE retailer_transactions
-                    SET actual_synced_at = datetime('now')
-                    WHERE retailer_txn_id = ?
-                    """,
-                    (txn_id,),
-                )
-                db_conn.commit()
+            if row["actual_synced_at"] is None:
+                result.synced += 1
+                result.synced_rows.append(SyncedRow(
+                    retailer_txn_id=txn_id,
+                    order_id=order_id,
+                    txn_date=str(txn_date),
+                    amount_cents=amount_cents,
+                ))
 
-            result.synced += 1
-            result.synced_rows.append(SyncedRow(
-                retailer_txn_id=txn_id,
-                order_id=order_id,
-                txn_date=str(txn_date),
-                amount_cents=amount_cents,
-            ))
-
-        if not dry_run and result.synced > 0:
+        if not dry_run and note_updates_needed:
             actual.commit()
+
+    if not dry_run and synced_ids:
+        db_conn.executemany(
+            """
+            UPDATE retailer_transactions
+            SET actual_synced_at = datetime('now')
+            WHERE retailer_txn_id = ?
+            """,
+            [(txn_id,) for txn_id in synced_ids],
+        )
+        db_conn.commit()
+
+    if not dry_run and skipped_updates:
+        db_conn.executemany(
+            """
+            UPDATE retailer_transactions
+            SET actual_skipped_at = datetime('now'),
+                actual_skip_reason = ?
+            WHERE retailer_txn_id = ?
+            """,
+            skipped_updates,
+        )
+        db_conn.commit()
 
     return result

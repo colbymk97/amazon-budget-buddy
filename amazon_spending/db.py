@@ -133,6 +133,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
             )
         if "actual_synced_at" not in txn_cols:
             conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_synced_at TEXT")
+        if "actual_skipped_at" not in txn_cols:
+            conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_skipped_at TEXT")
+        if "actual_skip_reason" not in txn_cols:
+            conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_skip_reason TEXT")
 
     conn.executescript(
         """
@@ -198,6 +202,18 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     if _cols("retailer_transactions"):
         conn.executescript(
             """
+            CREATE INDEX IF NOT EXISTS idx_orders_retailer_order_date
+                ON orders(retailer, order_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_orders_order_date
+                ON orders(order_date DESC);
+            CREATE INDEX IF NOT EXISTS idx_orders_total
+                ON orders(order_total_cents);
+            CREATE INDEX IF NOT EXISTS idx_shipments_total
+                ON shipments(shipment_total_cents);
+            CREATE INDEX IF NOT EXISTS idx_retailer_transactions_txn_date
+                ON retailer_transactions(txn_date);
+            CREATE INDEX IF NOT EXISTS idx_retailer_transactions_actual_sync
+                ON retailer_transactions(actual_synced_at, txn_date);
             CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_category_id
                 ON retailer_transactions(budget_category_id);
             CREATE INDEX IF NOT EXISTS idx_retailer_transactions_budget_subcategory_id

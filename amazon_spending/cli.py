@@ -5,6 +5,7 @@ import getpass
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .db import (
     DEFAULT_DB_PATH,
@@ -17,9 +18,10 @@ from .db import (
     recent_retailer_order_ids,
     record_retailer_import_run,
 )
-from .exporter import export_reports
-from .importers import import_transactions_csv
 from .retailers import REGISTRY
+
+if TYPE_CHECKING:
+    from .actual_sync import ActualConfig
 
 VERSION = "0.1.0"
 _RETAILER_CHOICES = sorted(REGISTRY.keys())
@@ -75,47 +77,21 @@ examples:
   # Fastest incremental sync — stop when known orders are encountered
   amazon-spending collect --retailer amazon --stop-on-known
 
+  # Safer incremental sync — require two known orders before stopping
+  amazon-spending collect --retailer amazon --stop-on-known --overlap-match-threshold 2
+
+  # Reduce disk usage from raw snapshots
+  amazon-spending collect --retailer amazon --save-raw on-error --raw-retention-runs 10
+
   # Machine-readable JSON output
   amazon-spending collect --retailer amazon --order-limit 10 --json
 
 notes:
-  - Raw HTML is saved under --outdir/<timestamp>/ before parsing.
+  - Raw HTML can be saved under --outdir/<timestamp>/ before parsing.
   - Headless mode falls back automatically when the retailer requires
     interactive login or MFA.
   - --saved-run-dir implies --test-run automatically.
   - Deprecated alias: collect-amazon (same as collect --retailer amazon)
-"""
-
-_IMPORT_EPILOG = """
-required CSV columns:
-  transaction_id   Unique identifier for the bank/card transaction
-  posted_date      ISO date the transaction posted (YYYY-MM-DD)
-  amount           Transaction amount in dollars (e.g. 42.99 or -12.50)
-  merchant_raw     Raw merchant name as it appears on the statement
-
-examples:
-  # Import from a Copilot / Chase CSV export
-  amazon-spending import-transactions --csv data/transactions.csv
-
-  # Tag rows with an account label for multi-card households
-  amazon-spending import-transactions --csv data/amex.csv --account-id amex-gold
-
-  # Emit a JSON summary instead of plain text
-  amazon-spending import-transactions --csv data/transactions.csv --json
-"""
-
-_EXPORT_EPILOG = """
-output files:
-  report_transaction_itemized.csv   Each transaction mapped to its matched order items
-  report_unmatched.csv              Transactions with no order match
-  report_monthly_summary.csv        Monthly spending totals grouped by essential flag
-
-examples:
-  # Export to the default directory (data/exports/)
-  amazon-spending export
-
-  # Export to a custom directory
-  amazon-spending export --outdir ~/reports/2024
 """
 
 _LOGIN_EPILOG = """
@@ -148,15 +124,22 @@ examples:
   # Sync all unsynced retailer transactions to Actual Budget
   amazon-spending actual-sync
 
+  # Refresh notes for already-synced transactions too
+  amazon-spending actual-sync --refresh-notes
+
   # Machine-readable output
   amazon-spending actual-sync --json
 
 notes:
   - Configure Actual once with actual-configure; actual-sync reuses that stored config.
-  - Only transactions with actual_synced_at IS NULL are processed.
+  - Only unsynced transactions that are not already skipped are processed.
   - Each transaction is matched by exact amount (±$0) within ±3 days of txn_date.
   - The first matching Actual transaction has its notes appended with the
     Amazon order ID and allocated line-items.
+  - Use --refresh-notes to revisit previously-synced transactions and rewrite
+    their Amazon note block with the current item list.
+  - Gift-card, points, and synthetic summary rows are skipped and not retried
+    on future runs.
   - Synced transactions are never re-processed.
 """
 
@@ -298,6 +281,19 @@ def _add_collect_args(p: argparse.ArgumentParser) -> None:
             "default: latest under --outdir)"
         ),
     )
+    storage_group.add_argument(
+        "--save-raw",
+        choices=["always", "on-error", "never"],
+        default="always",
+        help="Raw HTML snapshot policy (default: always)",
+    )
+    storage_group.add_argument(
+        "--raw-retention-runs",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Keep only the latest N timestamped raw snapshot runs after collect",
+    )
 
     # Incremental sync
     sync_group = p.add_argument_group("incremental sync options")
@@ -308,6 +304,13 @@ def _add_collect_args(p: argparse.ArgumentParser) -> None:
             "Stop scanning as soon as a previously imported order ID is encountered "
             "(fastest for incremental syncs)"
         ),
+    )
+    sync_group.add_argument(
+        "--overlap-match-threshold",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Known order IDs to encounter before stopping when --stop-on-known is enabled (default: 1)",
     )
 
     # Output
@@ -329,9 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "amazon-spending — local-first retailer order collector and budget tool.\n"
             "\n"
-            "Scrapes order history from supported retailers into a local SQLite database,\n"
-            "imports bank/card transactions, and exports reconciliation reports. All data\n"
-            "stays on your machine — no cloud services required.\n"
+            "Scrapes order history from supported retailers into a local SQLite database\n"
+            "and syncs it to Actual Budget for reconciliation. All data stays on your\n"
+            "machine — no cloud services required.\n"
             "\n"
             f"supported retailers: {', '.join(_RETAILER_CHOICES)}"
         ),
@@ -549,69 +552,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_audit_args(p_from_latest)
 
-    # ------------------------------------------------------ import-transactions
-    p_import = sub.add_parser(
-        "import-transactions",
-        help="Import bank/card transactions from a CSV file",
-        description=(
-            "Reads a CSV file of bank or credit-card transactions and upserts\n"
-            "them into the local database for future reconciliation with retailer\n"
-            "orders. Existing rows are updated on conflict; no duplicates are\n"
-            "created for the same transaction_id."
-        ),
-        formatter_class=_Formatter,
-        epilog=_IMPORT_EPILOG,
-    )
-    p_import.add_argument(
-        "--csv",
-        type=Path,
-        required=True,
-        metavar="PATH",
-        help="Path to the transactions CSV file (required)",
-    )
-    p_import.add_argument(
-        "--account-id",
-        type=str,
-        default=None,
-        metavar="ID",
-        help="Optional label to tag rows with (e.g. 'chase-freedom', 'amex-gold')",
-    )
-    p_import.add_argument(
-        "--json",
-        dest="output_json",
-        action="store_true",
-        help="Print results as a JSON object instead of plain text",
-    )
-
-    # ------------------------------------------------------------------ export
-    p_export = sub.add_parser(
-        "export",
-        help="Export reconciliation reports to CSV files",
-        description=(
-            "Generates three CSV reports from the local database:\n"
-            "\n"
-            "  • report_transaction_itemized.csv — each transaction matched\n"
-            "    to its retailer order line items\n"
-            "  • report_unmatched.csv — transactions with no order match\n"
-            "  • report_monthly_summary.csv — monthly totals by essential flag"
-        ),
-        formatter_class=_Formatter,
-        epilog=_EXPORT_EPILOG,
-    )
-    p_export.add_argument(
-        "--outdir",
-        type=Path,
-        default=Path("data/exports"),
-        metavar="PATH",
-        help="Directory to write report files into (default: data/exports)",
-    )
-    p_export.add_argument(
-        "--json",
-        dest="output_json",
-        action="store_true",
-        help="Print a JSON summary of output file paths instead of plain text",
-    )
-
     # ------------------------------------------------------- actual-configure
     p_actual_config = sub.add_parser(
         "actual-configure",
@@ -682,6 +622,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print each synced and missed transaction",
     )
     p_actual.add_argument(
+        "--refresh-notes",
+        action="store_true",
+        help="Also revisit already-synced transactions and rewrite their Amazon note block",
+    )
+    p_actual.add_argument(
         "--json",
         dest="output_json",
         action="store_true",
@@ -742,6 +687,9 @@ def _handle_collect(args: argparse.Namespace, conn, retailer_id: str) -> None:
         saved_run_dir=args.saved_run_dir,
         stop_when_before_start_date=args.stop_on_known,
         known_order_ids=known_order_ids,
+        overlap_match_threshold=getattr(args, "overlap_match_threshold", 1) if args.stop_on_known else 1,
+        save_raw=getattr(args, "save_raw", "always"),
+        raw_retention_runs=getattr(args, "raw_retention_runs", None),
     )
 
     bound_account = get_retailer_account(conn, retailer_id)
@@ -866,30 +814,6 @@ def _handle_login(args: argparse.Namespace, conn) -> None:
 
     if result.status not in ("logged_in",):
         sys.exit(1)
-
-
-def _handle_import(args: argparse.Namespace, conn) -> None:
-    count = import_transactions_csv(conn, args.csv, args.account_id)
-
-    if args.output_json:
-        print(json.dumps({"imported": count, "source": str(args.csv), "account_id": args.account_id}))
-        return
-
-    label = f" (account: {args.account_id})" if args.account_id else ""
-    print(f"Imported {count} transaction(s) from {args.csv}{label}")
-
-
-def _handle_export(args: argparse.Namespace, conn) -> None:
-    outputs = export_reports(conn, args.outdir)
-
-    if args.output_json:
-        print(json.dumps({k: str(v) for k, v in outputs.items()}, indent=2))
-        return
-
-    print(f"Reports written to {args.outdir}/")
-    for name, path in outputs.items():
-        size = path.stat().st_size if path.exists() else 0
-        print(f"  {path.name}  ({size} bytes)")
 
 
 def _actual_config_payload(cfg) -> dict[str, object]:
@@ -1086,7 +1010,7 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
         cfg = _run_actual_setup_wizard(conn)
 
     try:
-        result = sync_to_actual(conn, cfg, dry_run=args.dry_run)
+        result = sync_to_actual(conn, cfg, dry_run=args.dry_run, refresh_notes=args.refresh_notes)
     except RuntimeError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1098,6 +1022,8 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
     mode = " (dry run)" if args.dry_run else ""
     print(f"Actual Budget sync{mode}: {cfg.base_url} / {cfg.file!r}")
     print(f"  synced:    {result.synced}")
+    print(f"  refreshed: {result.refreshed}")
+    print(f"  skipped:   {result.skipped}")
     print(f"  no match:  {result.no_match}")
     if result.errors:
         print(f"  errors:    {len(result.errors)}")
@@ -1108,12 +1034,32 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
     if verbose:
         if result.synced_rows:
             print(f"\nSynced ({result.synced}):")
-            for r in result.synced_rows:
-                print(f"  {r.txn_date}  ${abs(r.amount_cents)/100:>8.2f}  {r.order_id}  [{r.retailer_txn_id}]")
+            for synced_row in result.synced_rows:
+                print(
+                    f"  {synced_row.txn_date}  ${abs(synced_row.amount_cents)/100:>8.2f}  "
+                    f"{synced_row.order_id}  [{synced_row.retailer_txn_id}]"
+                )
+        if result.refreshed_rows:
+            print(f"\nRefreshed ({result.refreshed}):")
+            for refreshed_row in result.refreshed_rows:
+                print(
+                    f"  {refreshed_row.txn_date}  ${abs(refreshed_row.amount_cents)/100:>8.2f}  "
+                    f"{refreshed_row.order_id}  [{refreshed_row.retailer_txn_id}]"
+                )
         if result.missed_rows:
             print(f"\nNo match ({result.no_match}):")
-            for r in result.missed_rows:
-                print(f"  {r.txn_date}  ${abs(r.amount_cents)/100:>8.2f}  {r.order_id}  [{r.retailer_txn_id}]")
+            for missed_row in result.missed_rows:
+                print(
+                    f"  {missed_row.txn_date}  ${abs(missed_row.amount_cents)/100:>8.2f}  "
+                    f"{missed_row.order_id}  [{missed_row.retailer_txn_id}]"
+                )
+        if result.skipped_rows:
+            print(f"\nSkipped ({result.skipped}):")
+            for skipped_row in result.skipped_rows:
+                print(
+                    f"  {skipped_row.txn_date}  ${abs(skipped_row.amount_cents)/100:>8.2f}  "
+                    f"{skipped_row.order_id}  [{skipped_row.retailer_txn_id}]  {skipped_row.reason}"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -1137,10 +1083,6 @@ def main() -> None:
         elif args.command == "collect-amazon":
             # Legacy alias — behaves exactly like collect --retailer amazon
             _handle_collect(args, conn, "amazon")
-        elif args.command == "import-transactions":
-            _handle_import(args, conn)
-        elif args.command == "export":
-            _handle_export(args, conn)
         elif args.command == "actual-configure":
             _handle_actual_configure(args, conn)
         elif args.command == "actual-sync":

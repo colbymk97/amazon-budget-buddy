@@ -34,6 +34,8 @@ class TargetCollector(RetailerCollector):
         stop_when_before_start_date: bool = False,
         known_order_ids: list[str] | None = None,
         overlap_match_threshold: int = 1,
+        save_raw: str = "always",
+        raw_retention_runs: int | None = None,
     ) -> CollectResult:
         raise NotImplementedError(
             "Target scraping is not yet implemented.\n"

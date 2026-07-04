@@ -205,10 +205,7 @@ def audit_amazon(
                 page.wait_for_load_state("domcontentloaded", timeout=15000)
             except PlaywrightTimeoutError:
                 pass
-            try:
-                page.wait_for_load_state("networkidle", timeout=3000)
-            except PlaywrightTimeoutError:
-                pass
+            _wait_for_orders_page_ready(page, timeout_ms=5000)
 
             summaries = _extract_listing_order_summaries_from_html(page.content())
             pages_scanned = page_num

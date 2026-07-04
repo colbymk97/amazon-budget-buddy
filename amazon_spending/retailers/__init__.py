@@ -14,7 +14,6 @@ from .target import TargetCollector
 
 REGISTRY: dict[str, RetailerCollector] = {
     "amazon": AmazonCollector(),
-    "target": TargetCollector(),
 }
 
 __all__ = [

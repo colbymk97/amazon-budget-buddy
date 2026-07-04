@@ -18,8 +18,10 @@ dependencies = [
 amazon-spending = "amazon_spending.cli:main"
 
 [tool.setuptools]
-packages = ["amazon_spending"]
 include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["amazon_spending*"]
 
 [tool.setuptools.package-data]
 amazon_spending = ["sql/*.sql"]

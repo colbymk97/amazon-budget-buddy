@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ ITEM_IMAGE_QTY_RE = re.compile(
     r'od-item-view-qty">\s*<span>\s*(\d+)\s*</span>',
     flags=re.IGNORECASE | re.DOTALL,
 )
+SAVE_RAW_MODES = {"always", "on-error", "never"}
 
 
 @dataclass(frozen=True)
@@ -883,9 +885,14 @@ def _merge_listing_orders(
     known_order_id_set: set[str],
     collected_orders: list[ListingOrderSummary],
     order_limit: int | None,
+    *,
+    previously_matched_known_order_ids: set[str] | None = None,
+    overlap_match_threshold: int = 1,
 ) -> tuple[list[ListingOrderSummary], set[str], bool]:
     matched_known_order_ids: set[str] = set()
+    all_matched_known_order_ids = set(previously_matched_known_order_ids or set())
     stop_after_known_order = False
+    threshold = max(1, overlap_match_threshold)
 
     for listing_order in current_orders:
         oid = listing_order.order_id
@@ -894,13 +901,61 @@ def _merge_listing_orders(
         seen_orders.add(oid)
         if oid in known_order_id_set:
             matched_known_order_ids.add(oid)
-            stop_after_known_order = True
-            break
+            all_matched_known_order_ids.add(oid)
+            if len(all_matched_known_order_ids) >= threshold:
+                stop_after_known_order = True
+                break
+            continue
         collected_orders.append(listing_order)
         if order_limit and len(collected_orders) >= order_limit:
             break
 
     return collected_orders, matched_known_order_ids, stop_after_known_order
+
+
+def _normalize_save_raw_mode(save_raw: str) -> str:
+    mode = save_raw.strip().lower()
+    if mode not in SAVE_RAW_MODES:
+        raise ValueError(f"save_raw must be one of: {', '.join(sorted(SAVE_RAW_MODES))}")
+    return mode
+
+
+def _write_raw_snapshot(
+    run_dir: Path,
+    filename: str,
+    html: str,
+    save_raw: str,
+    *,
+    is_error: bool = False,
+) -> bool:
+    if save_raw == "never":
+        return False
+    if save_raw == "on-error" and not is_error:
+        return False
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / filename).write_text(html, encoding="utf-8")
+    return True
+
+
+def _prune_raw_runs(output_dir: Path, keep_runs: int | None) -> int:
+    if keep_runs is None:
+        return 0
+    keep = max(0, keep_runs)
+    if keep == 0 or not output_dir.exists():
+        return 0
+    candidates = sorted(
+        (
+            p
+            for p in output_dir.iterdir()
+            if p.is_dir() and re.fullmatch(r"\d{8}_\d{6}", p.name)
+        ),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    stale = candidates[keep:]
+    for path in stale:
+        shutil.rmtree(path)
+    return len(stale)
 
 
 def _needs_auth(page) -> bool:
@@ -995,12 +1050,24 @@ def _wait_for_login(page, timeout_s: int = 300) -> bool:
     return False
 
 
-def _launch_and_open_orders(p, profile_dir: Path, headless: bool):
+def _install_resource_blocking(context) -> None:
+    def route_handler(route) -> None:
+        if route.request.resource_type in {"image", "media", "font"}:
+            route.abort()
+            return
+        route.continue_()
+
+    context.route("**/*", route_handler)
+
+
+def _launch_and_open_orders(p, profile_dir: Path, headless: bool, *, block_resources: bool = True):
     context = p.chromium.launch_persistent_context(
         user_data_dir=str(profile_dir),
         headless=headless,
         viewport={"width": 1400, "height": 1000},
     )
+    if block_resources:
+        _install_resource_blocking(context)
     page = context.new_page()
     page.goto("https://www.amazon.com/gp/your-account/order-history", wait_until="domcontentloaded")
     return context, page
@@ -1108,8 +1175,14 @@ def collect_amazon(
     stop_when_before_start_date: bool = False,
     known_order_ids: list[str] | None = None,
     overlap_match_threshold: int = 1,
+    save_raw: str = "always",
+    raw_retention_runs: int | None = None,
 ) -> CollectResult:
     output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        save_raw = _normalize_save_raw_mode(save_raw)
+    except ValueError as exc:
+        return CollectResult(status="error", notes=str(exc))
 
     all_orders: list[ParsedOrder] = []
     all_items: list[ParsedItem] = []
@@ -1208,7 +1281,8 @@ def collect_amazon(
         )
 
     run_dir = output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if save_raw == "always":
+        run_dir.mkdir(parents=True, exist_ok=True)
 
     profile_dir = user_data_dir or (output_dir / "browser_profile")
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -1242,7 +1316,7 @@ def collect_amazon(
                         "under data/raw/amazon/browser_profile."
                     ),
                 )
-            context, page = _launch_and_open_orders(p, profile_dir, headless=False)
+            context, page = _launch_and_open_orders(p, profile_dir, headless=False, block_resources=False)
             print("Authentication required. Complete Amazon login/MFA, navigate to Orders, then press Enter.")
             if not sys.stdin.isatty():
                 context.close()
@@ -1297,26 +1371,36 @@ def collect_amazon(
             except PlaywrightTimeoutError:
                 pass
             try:
-                page.wait_for_load_state("networkidle", timeout=3000)
+                _wait_for_orders_page_ready(page, timeout_ms=5000)
             except PlaywrightTimeoutError:
                 pass
-            _wait_for_orders_page_ready(page, timeout_ms=8000)
 
             html = page.content()
-            (run_dir / f"orders_page_{page_num}.html").write_text(html, encoding="utf-8")
             listing_pages_scanned = page_num
 
             current_orders = _extract_listing_order_summaries(page)
+            _write_raw_snapshot(
+                run_dir,
+                f"orders_page_{page_num}.html",
+                html,
+                save_raw,
+                is_error=not current_orders,
+            )
             listing_orders, page_known_matches, stop_after_known_order = _merge_listing_orders(
                 current_orders,
                 seen_orders,
                 known_order_id_set,
                 listing_orders,
                 order_limit,
+                previously_matched_known_order_ids=matched_known_order_ids,
+                overlap_match_threshold=overlap_match_threshold,
             )
             matched_known_order_ids.update(page_known_matches)
             for oid in page_known_matches:
-                print(f"[orders] encountered known order_id={oid}; stopping listing scan")
+                print(
+                    f"[orders] encountered known order_id={oid}; "
+                    f"matched_known={len(matched_known_order_ids)}/{max(1, overlap_match_threshold)}"
+                )
             discovered_order_count = len(listing_orders)
             print(
                 f"[orders] page={page_num} discovered_total={discovered_order_count} "
@@ -1375,9 +1459,15 @@ def collect_amazon(
             try:
                 detail_page.goto(detail_url, wait_until="domcontentloaded", timeout=30000)
                 detail_html = detail_page.content()
-                (run_dir / f"order_{order_id}.html").write_text(detail_html, encoding="utf-8")
 
                 parsed_order, parsed_items, transaction_tag = _parse_order_details(detail_html, order_id, detail_url)
+                _write_raw_snapshot(
+                    run_dir,
+                    f"order_{order_id}.html",
+                    detail_html,
+                    save_raw,
+                    is_error=parsed_order is None,
+                )
                 if parsed_order:
                     is_before_start = bool(start_date and parsed_order.order_date < start_date)
                     if _in_date_range(parsed_order.order_date, start_date, end_date):
@@ -1396,7 +1486,12 @@ def collect_amazon(
                         try:
                             tx_page.goto(tx_url, wait_until="domcontentloaded", timeout=30000)
                             tx_html = tx_page.content()
-                            (run_dir / f"transactions_{order_id}.html").write_text(tx_html, encoding="utf-8")
+                            _write_raw_snapshot(
+                                run_dir,
+                                f"transactions_{order_id}.html",
+                                tx_html,
+                                save_raw,
+                            )
                             parsed_txns = _parse_related_transactions(
                                 content=tx_html,
                                 order_id=order_id,
@@ -1406,6 +1501,16 @@ def collect_amazon(
                                 source_url=tx_url,
                             )
                         except Exception:
+                            try:
+                                _write_raw_snapshot(
+                                    run_dir,
+                                    f"transactions_{order_id}.html",
+                                    tx_page.content(),
+                                    save_raw,
+                                    is_error=True,
+                                )
+                            except Exception:
+                                pass
                             # Preserve pipeline progress even if related-transactions page fails.
                             parsed_txns = [
                                 ParsedRetailerTransaction(
@@ -1458,7 +1563,18 @@ def collect_amazon(
 
         context.close()
 
-    notes = f"Saved raw pages to {run_dir}"
+    pruned_runs = _prune_raw_runs(output_dir, raw_retention_runs)
+    if save_raw == "always":
+        notes = f"Saved raw pages to {run_dir}"
+    elif save_raw == "on-error":
+        if run_dir.exists():
+            notes = f"Saved raw error pages to {run_dir}"
+        else:
+            notes = "Raw page saving set to on-error; no error pages were saved."
+    else:
+        notes = "Raw page saving disabled."
+    if pruned_runs:
+        notes += f" | pruned_raw_runs={pruned_runs}"
     if start_date or end_date:
         notes += f" | filters requested start_date={start_date}, end_date={end_date}"
     if known_order_id_set:
@@ -1468,7 +1584,10 @@ def collect_amazon(
             f" matched_known_orders={len(matched_known_order_ids)}"
         )
     if not all_orders:
-        notes = f"No orders parsed. Raw pages saved under {run_dir}"
+        if save_raw == "always" or run_dir.exists():
+            notes = f"No orders parsed. Raw pages saved under {run_dir}"
+        else:
+            notes = "No orders parsed. No raw pages were saved."
     return _build_collect_result(
         conn,
         all_orders,
@@ -1592,6 +1711,8 @@ class AmazonCollector(RetailerCollector):
         stop_when_before_start_date=False,
         known_order_ids=None,
         overlap_match_threshold=1,
+        save_raw="always",
+        raw_retention_runs=None,
     ) -> CollectResult:
         return collect_amazon(
             conn=conn,
@@ -1609,4 +1730,6 @@ class AmazonCollector(RetailerCollector):
             stop_when_before_start_date=stop_when_before_start_date,
             known_order_ids=known_order_ids,
             overlap_match_threshold=overlap_match_threshold,
+            save_raw=save_raw,
+            raw_retention_runs=raw_retention_runs,
         )

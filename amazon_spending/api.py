@@ -269,6 +269,9 @@ def _run_sync_job() -> None:
                 should_abort=_cancel_requested,
                 stop_when_before_start_date=True,
                 known_order_ids=recent_known_order_ids,
+                overlap_match_threshold=2,
+                save_raw="on-error",
+                raw_retention_runs=10,
             )
         finally:
             conn.close()
@@ -294,6 +297,9 @@ def _run_sync_job() -> None:
                     should_abort=_cancel_requested,
                     stop_when_before_start_date=True,
                     known_order_ids=recent_known_order_ids,
+                    overlap_match_threshold=2,
+                    save_raw="on-error",
+                    raw_retention_runs=10,
                 )
             finally:
                 conn_retry.close()
@@ -916,6 +922,7 @@ def actual_status():
             """
             SELECT COUNT(*) AS n FROM retailer_transactions
             WHERE actual_synced_at IS NULL
+              AND actual_skipped_at IS NULL
               AND txn_date IS NOT NULL
               AND amount_cents IS NOT NULL
             """

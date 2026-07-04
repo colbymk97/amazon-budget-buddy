@@ -1,8 +1,8 @@
 # amazon-spending
 
 Local-first tooling to collect and store retailer order history in SQLite and
-reconcile it with bank/card transactions. Supports Amazon today, with a
-pluggable adapter interface for adding new retailers (e.g. Target).
+sync it to Actual Budget for reconciliation. Supports Amazon today, with a
+pluggable adapter interface for adding new retailers.
 All data stays on your machine — no cloud services required.
 
 ## Installation
@@ -117,7 +117,7 @@ Scrape retailer order history into the local database.
 amazon-spending collect --retailer <name> [options]
 ```
 
-**Supported retailers:** `amazon`, `target` *(Target scraping is not yet implemented — see [Adding a New Retailer](#adding-a-new-retailer))*
+**Supported retailers:** `amazon`
 
 #### Options
 
@@ -143,12 +143,15 @@ amazon-spending collect --retailer <name> [options]
 | `--outdir PATH` | `data/raw/<retailer>` | Directory for raw HTML snapshots |
 | `--test-run` | off | Parse a saved snapshot without launching browser |
 | `--saved-run-dir PATH` | latest | Specific snapshot dir to parse (implies `--test-run`) |
+| `--save-raw always\|on-error\|never` | `always` | Raw HTML snapshot policy |
+| `--raw-retention-runs N` | unlimited | Keep only the latest N timestamped raw snapshot runs |
 
 **Incremental sync options**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--stop-on-known` | off | Stop when a previously imported order is encountered |
+| `--overlap-match-threshold N` | `1` | Known order IDs to encounter before stopping with `--stop-on-known` |
 
 **Output options**
 
@@ -171,6 +174,12 @@ amazon-spending collect --retailer amazon --headed --order-limit 20
 # Fastest incremental sync
 amazon-spending collect --retailer amazon --stop-on-known
 
+# Safer incremental sync with extra overlap
+amazon-spending collect --retailer amazon --stop-on-known --overlap-match-threshold 2
+
+# Reduce raw snapshot disk usage
+amazon-spending collect --retailer amazon --save-raw on-error --raw-retention-runs 10
+
 # Re-parse saved HTML without launching a browser
 amazon-spending collect --retailer amazon --test-run
 
@@ -179,63 +188,6 @@ amazon-spending collect --retailer amazon --order-limit 10 --json
 ```
 
 **Deprecated alias:** `collect-amazon` behaves identically to `collect --retailer amazon`.
-
----
-
-### `import-transactions`
-
-Import bank or credit-card transactions from a CSV file.
-
-```
-amazon-spending import-transactions --csv PATH [--account-id ID] [--json]
-```
-
-#### Required CSV Columns
-
-| Column | Description |
-|--------|-------------|
-| `transaction_id` | Unique identifier for the transaction |
-| `posted_date` | ISO date posted (`YYYY-MM-DD`) |
-| `amount` | Amount in dollars (e.g. `42.99`) |
-| `merchant_raw` | Raw merchant name from the statement |
-
-#### Options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--csv PATH` | *(required)* | Path to the CSV file |
-| `--account-id ID` | none | Tag rows with an account label |
-| `--json` | off | Print results as JSON |
-
-**Examples**
-
-```bash
-amazon-spending import-transactions --csv data/transactions.csv
-amazon-spending import-transactions --csv data/amex.csv --account-id amex-gold
-```
-
----
-
-### `export`
-
-Export reconciliation reports to CSV files.
-
-```
-amazon-spending export [--outdir PATH] [--json]
-```
-
-| Output File | Description |
-|------------|-------------|
-| `report_transaction_itemized.csv` | Each transaction matched to its order items |
-| `report_unmatched.csv` | Transactions with no order match |
-| `report_monthly_summary.csv` | Monthly totals by essential flag |
-
-**Examples**
-
-```bash
-amazon-spending export
-amazon-spending export --outdir ~/reports/2024
-```
 
 ---
 
