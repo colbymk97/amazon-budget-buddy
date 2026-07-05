@@ -3,13 +3,13 @@
 Requires the optional ``actualpy`` package::
 
     pip install actualpy
-    # or: pip install "amazon-spending[actual]"
+    # or: pip install "budget-buddy[actual]"
 
 Configuration
 -------------
 Store Actual Budget settings in the local SQLite database via the CLI::
 
-    amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+    budget-buddy actual-configure --base-url http://localhost:5006 --file "My Budget"
 
 The CLI prompts for the password if it is not supplied on the command line.
 ``account_name`` is optional. When set, transaction matching is restricted to
@@ -32,6 +32,18 @@ For each retailer transaction that has not yet been synced:
 Rows that clearly do not represent imported bank or card activity are marked
 with ``actual_skipped_at`` and ``actual_skip_reason`` so future runs focus on
 real ledger-backed transactions.
+
+Categories
+----------
+Budget Buddy never invents its own category taxonomy. ``budget_categories``/
+``budget_subcategories`` are a local read-only mirror of Actual's own category
+groups/categories, refreshed via ``sync_categories_from_actual()``. If a
+transaction has a locally-assigned category *before* its first sync, that
+category is pushed to Actual exactly once, at the moment the transaction is
+first synced — never again after that, so manual corrections made directly in
+Actual are never overwritten. On every sync, the current category is also read
+back from Actual into the local mirror, so Budget Buddy's own reports stay
+accurate even after you re-categorize something in Actual's UI.
 
 Set ``dry_run=True`` to preview matches without writing anything.
 """
@@ -92,6 +104,75 @@ def save_config(conn: sqlite3.Connection, config: ActualConfig) -> None:
     conn.commit()
 
 
+def sync_categories_from_actual(db_conn: sqlite3.Connection, config: ActualConfig) -> int:
+    """Pull category groups/categories from Actual into the local read-only mirror.
+
+    This only ever reads from Actual — it never creates or edits categories
+    there, and never touches per-transaction category assignments. Safe to
+    call anytime. Hidden groups/categories in Actual are not imported, since a
+    hidden category is a signal the user doesn't want it offered for use.
+
+    Returns the number of categories upserted.
+    """
+    try:
+        from actual import Actual
+        from actual.queries import get_categories, get_category_groups
+    except ImportError as exc:
+        raise RuntimeError(
+            "actualpy is not installed. Run: pip install actualpy"
+            " (or: pip install \"budget-buddy[actual]\")"
+        ) from exc
+
+    with Actual(base_url=config.base_url, password=config.password, file=config.file) as actual:
+        groups = get_category_groups(actual.session, include_deleted=False)
+        categories = get_categories(actual.session, include_deleted=False)
+
+        for group in groups:
+            if group.hidden:
+                continue
+            db_conn.execute(
+                """
+                INSERT INTO budget_categories (actual_group_id, name)
+                VALUES (?, ?)
+                ON CONFLICT(actual_group_id) DO UPDATE SET
+                    name = excluded.name,
+                    updated_at = datetime('now')
+                """,
+                (group.id, group.name),
+            )
+        db_conn.commit()
+
+        group_id_map = {
+            row["actual_group_id"]: row["category_id"]
+            for row in db_conn.execute(
+                "SELECT category_id, actual_group_id FROM budget_categories WHERE actual_group_id IS NOT NULL"
+            ).fetchall()
+        }
+
+        count = 0
+        for category in categories:
+            if category.hidden:
+                continue
+            local_category_id = group_id_map.get(category.cat_group)
+            if local_category_id is None:
+                continue
+            db_conn.execute(
+                """
+                INSERT INTO budget_subcategories (category_id, actual_category_id, name)
+                VALUES (?, ?, ?)
+                ON CONFLICT(actual_category_id) DO UPDATE SET
+                    category_id = excluded.category_id,
+                    name = excluded.name,
+                    updated_at = datetime('now')
+                """,
+                (local_category_id, category.id, category.name),
+            )
+            count += 1
+        db_conn.commit()
+
+    return count
+
+
 def test_connection(config: ActualConfig) -> None:
     """Validate Actual Budget connectivity and selected budget/account access."""
     try:
@@ -100,7 +181,7 @@ def test_connection(config: ActualConfig) -> None:
     except ImportError as exc:
         raise RuntimeError(
             "actualpy is not installed. Run: pip install actualpy"
-            " (or: pip install \"amazon-spending[actual]\")"
+            " (or: pip install \"budget-buddy[actual]\")"
         ) from exc
 
     try:
@@ -278,7 +359,7 @@ def sync_to_actual(
     Parameters
     ----------
     db_conn:
-        Open connection to the local amazon-spending SQLite database.
+        Open connection to the local budget-buddy SQLite database.
     config:
         Actual Budget connection settings.
     dry_run:
@@ -297,7 +378,7 @@ def sync_to_actual(
     except ImportError as exc:
         raise RuntimeError(
             "actualpy is not installed. Run: pip install actualpy"
-            " (or: pip install \"amazon-spending[actual]\")"
+            " (or: pip install \"budget-buddy[actual]\")"
         ) from exc
 
     where_clause = """
@@ -310,16 +391,29 @@ def sync_to_actual(
 
     pending = db_conn.execute(
         f"""
-        SELECT retailer_txn_id, txn_date, amount_cents, order_id, raw_label, payment_last4, transaction_tag, actual_synced_at
+        SELECT retailer_txn_id, txn_date, amount_cents, order_id, raw_label, payment_last4,
+               transaction_tag, actual_synced_at, budget_subcategory_id
         FROM retailer_transactions
         WHERE {where_clause}
         ORDER BY txn_date
         """
     ).fetchall()
 
+    # Local subcategory <-> Actual category id maps, used to push a category on
+    # first sync and to read the current Actual category back into our mirror.
+    subcategory_rows = db_conn.execute(
+        "SELECT subcategory_id, category_id, actual_category_id FROM budget_subcategories "
+        "WHERE actual_category_id IS NOT NULL"
+    ).fetchall()
+    local_to_actual_category = {r["subcategory_id"]: r["actual_category_id"] for r in subcategory_rows}
+    actual_to_local_category = {
+        r["actual_category_id"]: (r["subcategory_id"], r["category_id"]) for r in subcategory_rows
+    }
+
     result = SyncResult()
     synced_ids: list[str] = []
     skipped_updates: list[tuple[str, str]] = []
+    category_read_back_updates: list[tuple[int, int, str]] = []
     note_updates_needed = False
 
     with Actual(
@@ -408,6 +502,31 @@ def sync_to_actual(
                 if order_id in ((t.notes or ""))
             ]
             best = order_matches[0] if order_matches else matches[0]
+
+            # Write-once category push: only at the NULL -> synced transition, and
+            # only if Actual doesn't already have a category — never override a
+            # choice made directly in Actual, and never revisit on later syncs.
+            if (
+                not dry_run
+                and row["actual_synced_at"] is None
+                and best.category_id is None
+                and row["budget_subcategory_id"] is not None
+            ):
+                actual_category_id = local_to_actual_category.get(row["budget_subcategory_id"])
+                if actual_category_id is not None:
+                    best.category_id = actual_category_id
+                    note_updates_needed = True
+
+            # Read-back: keep our local category mirror in sync with whatever
+            # Actual currently has. This only reads from Actual, never writes to
+            # it, so it's safe to do on every matched row regardless of sync state.
+            if best.category_id is not None:
+                mapped = actual_to_local_category.get(best.category_id)
+                if mapped is not None:
+                    local_subcategory_id, local_category_id = mapped
+                    if local_subcategory_id != row["budget_subcategory_id"]:
+                        category_read_back_updates.append((local_category_id, local_subcategory_id, txn_id))
+
             existing_note = (best.notes or "").strip()
             merged_note = _merge_note(best.notes, note)
             note_changed = merged_note != existing_note
@@ -459,6 +578,18 @@ def sync_to_actual(
             WHERE retailer_txn_id = ?
             """,
             skipped_updates,
+        )
+        db_conn.commit()
+
+    if not dry_run and category_read_back_updates:
+        db_conn.executemany(
+            """
+            UPDATE retailer_transactions
+            SET budget_category_id = ?,
+                budget_subcategory_id = ?
+            WHERE retailer_txn_id = ?
+            """,
+            category_read_back_updates,
         )
         db_conn.commit()
 

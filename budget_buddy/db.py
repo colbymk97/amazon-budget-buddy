@@ -138,10 +138,27 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         if "actual_skip_reason" not in txn_cols:
             conn.execute("ALTER TABLE retailer_transactions ADD COLUMN actual_skip_reason TEXT")
 
+    # budget_categories/budget_subcategories: ensure Actual-mirror ID columns
+    category_cols = _cols("budget_categories")
+    if category_cols and "actual_group_id" not in category_cols:
+        conn.execute("ALTER TABLE budget_categories ADD COLUMN actual_group_id TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_categories_actual_group_id "
+            "ON budget_categories(actual_group_id)"
+        )
+    subcategory_cols = _cols("budget_subcategories")
+    if subcategory_cols and "actual_category_id" not in subcategory_cols:
+        conn.execute("ALTER TABLE budget_subcategories ADD COLUMN actual_category_id TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_subcategories_actual_category_id "
+            "ON budget_subcategories(actual_category_id)"
+        )
+
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS budget_categories (
             category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            actual_group_id TEXT UNIQUE,
             name TEXT NOT NULL UNIQUE,
             description TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -151,6 +168,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS budget_subcategories (
             subcategory_id INTEGER PRIMARY KEY AUTOINCREMENT,
             category_id INTEGER NOT NULL,
+            actual_category_id TEXT UNIQUE,
             name TEXT NOT NULL,
             description TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),

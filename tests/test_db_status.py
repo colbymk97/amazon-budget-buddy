@@ -1,6 +1,6 @@
 import unittest
 
-from amazon_spending.db import (
+from budget_buddy.db import (
     RetailerAccountMismatchError,
     connect,
     db_status_payload,

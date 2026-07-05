@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "amazon-spending"
+name = "budget-buddy"
 version = "0.1.0"
-description = "Local-first Amazon order history collector and viewer"
+description = "Local-first retailer order history collector and Actual Budget reconciler"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,16 +15,16 @@ dependencies = [
 ]
 
 [project.scripts]
-amazon-spending = "amazon_spending.cli:main"
+budget-buddy = "budget_buddy.cli:main"
 
 [tool.setuptools]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["amazon_spending*"]
+include = ["budget_buddy*"]
 
 [tool.setuptools.package-data]
-amazon_spending = ["sql/*.sql"]
+budget_buddy = ["sql/*.sql"]
 
 [project.optional-dependencies]
 actual = [

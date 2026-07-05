@@ -42,49 +42,49 @@ class _Formatter(argparse.RawDescriptionHelpFormatter):
 _INIT_DB_EPILOG = """
 examples:
   # Initialize with the default database path
-  amazon-spending init-db
+  budget-buddy init-db
 
   # Use a custom database file
-  amazon-spending --db ~/my-data.sqlite3 init-db
+  budget-buddy --db ~/my-data.sqlite3 init-db
 """
 
 _DB_STATUS_EPILOG = """
 examples:
   # Show counts, account bindings, and latest import timestamps
-  amazon-spending db-status
+  budget-buddy db-status
 
   # Read a non-default database
-  amazon-spending --db ~/my-data.sqlite3 db-status
+  budget-buddy --db ~/my-data.sqlite3 db-status
 """
 
 _COLLECT_EPILOG = """
 examples:
   # Collect the most recent 50 Amazon orders (headless, auto-auth fallback)
-  amazon-spending collect --retailer amazon --order-limit 50
+  budget-buddy collect --retailer amazon --order-limit 50
 
   # Collect a specific date range
-  amazon-spending collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
+  budget-buddy collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
 
   # Force a visible browser window (useful for first-time login / MFA)
-  amazon-spending collect --retailer amazon --headed --order-limit 20
+  budget-buddy collect --retailer amazon --headed --order-limit 20
 
   # Re-parse previously saved HTML without launching a browser
-  amazon-spending collect --retailer amazon --test-run
+  budget-buddy collect --retailer amazon --test-run
 
   # Re-parse a specific saved snapshot directory
-  amazon-spending collect --retailer amazon --saved-run-dir data/raw/amazon/20260216_081306
+  budget-buddy collect --retailer amazon --saved-run-dir data/raw/amazon/20260216_081306
 
   # Fastest incremental sync — stop when known orders are encountered
-  amazon-spending collect --retailer amazon --stop-on-known
+  budget-buddy collect --retailer amazon --stop-on-known
 
   # Safer incremental sync — require two known orders before stopping
-  amazon-spending collect --retailer amazon --stop-on-known --overlap-match-threshold 2
+  budget-buddy collect --retailer amazon --stop-on-known --overlap-match-threshold 2
 
   # Reduce disk usage from raw snapshots
-  amazon-spending collect --retailer amazon --save-raw on-error --raw-retention-runs 10
+  budget-buddy collect --retailer amazon --save-raw on-error --raw-retention-runs 10
 
   # Machine-readable JSON output
-  amazon-spending collect --retailer amazon --order-limit 10 --json
+  budget-buddy collect --retailer amazon --order-limit 10 --json
 
 notes:
   - Raw HTML can be saved under --outdir/<timestamp>/ before parsing.
@@ -97,13 +97,13 @@ notes:
 _LOGIN_EPILOG = """
 examples:
   # Open a browser window and log in to Amazon interactively
-  amazon-spending login --retailer amazon
+  budget-buddy login --retailer amazon
 
   # Check silently whether the stored session is still valid (exit 0 = ok)
-  amazon-spending login --retailer amazon --check
+  budget-buddy login --retailer amazon --check
 
   # Use a custom browser profile location
-  amazon-spending login --retailer amazon --user-data-dir /path/to/profile
+  budget-buddy login --retailer amazon --user-data-dir /path/to/profile
 
 notes:
   - Amazon requires MFA, so login is always interactive (no password flags).
@@ -116,19 +116,19 @@ notes:
 _ACTUAL_SYNC_EPILOG = """
 examples:
   # Configure Actual Budget once and store settings in the local DB
-  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+  budget-buddy actual-configure --base-url http://localhost:5006 --file "My Budget"
 
   # Preview matches without writing any changes
-  amazon-spending actual-sync --dry-run
+  budget-buddy actual-sync --dry-run
 
   # Sync all unsynced retailer transactions to Actual Budget
-  amazon-spending actual-sync
+  budget-buddy actual-sync
 
   # Refresh notes for already-synced transactions too
-  amazon-spending actual-sync --refresh-notes
+  budget-buddy actual-sync --refresh-notes
 
   # Machine-readable output
-  amazon-spending actual-sync --json
+  budget-buddy actual-sync --json
 
 notes:
   - Configure Actual once with actual-configure; actual-sync reuses that stored config.
@@ -155,20 +155,20 @@ modes:
 
 examples:
   # Full audit — compare all Amazon history against local DB
-  amazon-spending audit --retailer amazon --mode full
+  budget-buddy audit --retailer amazon --mode full
 
   # Same via alias
-  amazon-spending from-first-transaction --retailer amazon
+  budget-buddy from-first-transaction --retailer amazon
 
   # Latest audit — check for new orders since last collect
-  amazon-spending audit --retailer amazon --mode latest
-  amazon-spending from-latest-transaction --retailer amazon
+  budget-buddy audit --retailer amazon --mode latest
+  budget-buddy from-latest-transaction --retailer amazon
 
   # Force a visible browser window (useful if session needs re-auth)
-  amazon-spending audit --retailer amazon --mode full --headed
+  budget-buddy audit --retailer amazon --mode full --headed
 
   # Machine-readable output
-  amazon-spending audit --retailer amazon --mode latest --json
+  budget-buddy audit --retailer amazon --mode latest --json
 
 notes:
   - Only listing pages are fetched.  No order detail or payment pages are
@@ -183,19 +183,19 @@ notes:
 _ACTUAL_CONFIGURE_EPILOG = """
 examples:
   # Initial setup (password will be prompted if omitted)
-  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
+  budget-buddy actual-configure --base-url http://localhost:5006 --file "My Budget"
 
   # Validate the settings before saving them
-  amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget" --test-connection
+  budget-buddy actual-configure --base-url http://localhost:5006 --file "My Budget" --test-connection
 
   # Set or change the account filter
-  amazon-spending actual-configure --account-name "Chase Sapphire"
+  budget-buddy actual-configure --account-name "Chase Sapphire"
 
   # Remove the account filter and search all Actual accounts
-  amazon-spending actual-configure --clear-account-name
+  budget-buddy actual-configure --clear-account-name
 
   # Show the stored configuration without revealing the password
-  amazon-spending actual-configure --show
+  budget-buddy actual-configure --show
 """
 
 
@@ -328,9 +328,9 @@ def _add_collect_args(p: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="amazon-spending",
+        prog="budget-buddy",
         description=(
-            "amazon-spending — local-first retailer order collector and budget tool.\n"
+            "budget-buddy — local-first retailer order collector and budget tool.\n"
             "\n"
             "Scrapes order history from supported retailers into a local SQLite database\n"
             "and syncs it to Actual Budget for reconciliation. All data stays on your\n"
@@ -340,12 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=_Formatter,
         epilog=(
-            "Run 'amazon-spending <command> --help' for detailed help on any command.\n"
+            "Run 'budget-buddy <command> --help' for detailed help on any command.\n"
             "\n"
             "quick start:\n"
-            "  amazon-spending init-db\n"
-            "  amazon-spending collect --retailer amazon --order-limit 100\n"
-            "  amazon-spending db-status\n"
+            "  budget-buddy init-db\n"
+            "  budget-buddy collect --retailer amazon --order-limit 100\n"
+            "  budget-buddy db-status\n"
         ),
     )
 
@@ -359,7 +359,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"amazon-spending {VERSION}",
+        version=f"budget-buddy {VERSION}",
     )
 
     sub = parser.add_subparsers(dest="command", required=True, title="commands")
@@ -606,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Amazon order ID and line-items to that transaction's notes field.\n"
             "\n"
             "Requires actualpy: pip install actualpy\n"
-            "Requires prior setup via: amazon-spending actual-configure"
+            "Requires prior setup via: budget-buddy actual-configure"
         ),
         formatter_class=_Formatter,
         epilog=_ACTUAL_SYNC_EPILOG,
@@ -627,6 +627,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also revisit already-synced transactions and rewrite their Amazon note block",
     )
     p_actual.add_argument(
+        "--json",
+        dest="output_json",
+        action="store_true",
+        help="Print results as a JSON object instead of plain text",
+    )
+
+    # ------------------------------------------------- actual-categories-sync
+    p_actual_categories = sub.add_parser(
+        "actual-categories-sync",
+        help="Refresh the local category mirror from Actual Budget",
+        description=(
+            "Pulls category groups and categories from Actual Budget into the\n"
+            "local read-only mirror (budget_categories/budget_subcategories).\n"
+            "This only reads from Actual — it never creates or edits categories\n"
+            "there. Run this any time you add or rename categories in Actual.\n"
+            "\n"
+            "Requires actualpy: pip install actualpy\n"
+            "Requires prior setup via: budget-buddy actual-configure"
+        ),
+        formatter_class=_Formatter,
+    )
+    p_actual_categories.add_argument(
         "--json",
         dest="output_json",
         action="store_true",
@@ -941,7 +963,7 @@ def _handle_audit(args: argparse.Namespace, conn, mode: str) -> None:
                 max_date = max(dates)
                 print(
                     f"To import missing orders, run:\n"
-                    f"  amazon-spending collect --retailer {retailer_id}"
+                    f"  budget-buddy collect --retailer {retailer_id}"
                     f" --start-date {min_date} --end-date {max_date}"
                 )
     else:
@@ -1003,7 +1025,7 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
     if cfg is None:
         if args.output_json:
             print(
-                '{"error": "Actual Budget is not configured. Run: amazon-spending actual-configure --base-url <url> --file <budget>"}',
+                '{"error": "Actual Budget is not configured. Run: budget-buddy actual-configure --base-url <url> --file <budget>"}',
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1062,6 +1084,32 @@ def _handle_actual_sync(args: argparse.Namespace, conn) -> None:
                 )
 
 
+def _handle_actual_categories_sync(args: argparse.Namespace, conn) -> None:
+    from .actual_sync import load_config, sync_categories_from_actual
+
+    cfg = load_config(conn)
+    if cfg is None:
+        if args.output_json:
+            print(
+                '{"error": "Actual Budget is not configured. Run: budget-buddy actual-configure --base-url <url> --file <budget>"}',
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        cfg = _run_actual_setup_wizard(conn)
+
+    try:
+        count = sync_categories_from_actual(conn, cfg)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.output_json:
+        print(json.dumps({"categories_synced": count}, indent=2))
+        return
+
+    print(f"Synced {count} categories from Actual Budget: {cfg.base_url} / {cfg.file!r}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -1087,6 +1135,8 @@ def main() -> None:
             _handle_actual_configure(args, conn)
         elif args.command == "actual-sync":
             _handle_actual_sync(args, conn)
+        elif args.command == "actual-categories-sync":
+            _handle_actual_categories_sync(args, conn)
         elif args.command == "login":
             _handle_login(args, conn)
         elif args.command == "audit":

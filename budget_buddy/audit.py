@@ -192,7 +192,7 @@ def audit_amazon(
                 status="auth_required",
                 notes=(
                     "Amazon session is not authenticated or the orders page did not load. "
-                    "Run: amazon-spending login --retailer amazon"
+                    "Run: budget-buddy login --retailer amazon"
                 ),
             )
 

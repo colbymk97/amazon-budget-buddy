@@ -1,28 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ColumnDef } from "@tanstack/react-table";
 import { useNavigate } from "react-router-dom";
 import { formatMoney, listItems } from "../api";
 import type { OrderItem } from "../types";
 import { DataTable } from "../components/DataTable";
+import { useListQuery } from "../hooks/useListQuery";
 
 export function ItemsPage() {
-  const [rows, setRows] = useState<OrderItem[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [startDate, setStartDate] = useState("2000-01-01");
   const [endDate, setEndDate] = useState("2100-01-01");
   const [globalFilter, setGlobalFilter] = useState("");
   const navigate = useNavigate();
 
-  useEffect(() => {
-    setLoading(true);
-    setError("");
-    listItems({ search, start_date: startDate, end_date: endDate, limit: 1000 })
-      .then((res) => setRows(res.rows))
-      .catch(() => setError("Failed to load items"))
-      .finally(() => setLoading(false));
-  }, [search, startDate, endDate]);
+  const { rows, loading, error } = useListQuery<OrderItem>(
+    listItems,
+    { search, start_date: startDate, end_date: endDate, limit: 1000 },
+    "Failed to load items"
+  );
 
   const columns = useMemo<ColumnDef<OrderItem>[]>(
     () => [

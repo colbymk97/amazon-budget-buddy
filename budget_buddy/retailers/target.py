@@ -40,6 +40,6 @@ class TargetCollector(RetailerCollector):
         raise NotImplementedError(
             "Target scraping is not yet implemented.\n"
             "To add support, implement TargetCollector.collect() in\n"
-            "amazon_spending/retailers/target.py following the RetailerCollector\n"
-            "interface defined in amazon_spending/retailers/base.py."
+            "budget_buddy/retailers/target.py following the RetailerCollector\n"
+            "interface defined in budget_buddy/retailers/base.py."
         )

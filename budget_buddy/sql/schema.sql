@@ -46,17 +46,23 @@ CREATE TABLE IF NOT EXISTS retailer_transactions (
     FOREIGN KEY(budget_subcategory_id) REFERENCES budget_subcategories(subcategory_id)
 );
 
+-- Local read-only mirror of Actual Budget's category groups. Populated by
+-- sync_categories_from_actual(); never created or edited by hand in Budget Buddy.
 CREATE TABLE IF NOT EXISTS budget_categories (
     category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actual_group_id TEXT UNIQUE,
     name TEXT NOT NULL UNIQUE,
     description TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Local read-only mirror of Actual Budget's categories (the assignable leaf
+-- level). Populated by sync_categories_from_actual().
 CREATE TABLE IF NOT EXISTS budget_subcategories (
     subcategory_id INTEGER PRIMARY KEY AUTOINCREMENT,
     category_id INTEGER NOT NULL,
+    actual_category_id TEXT UNIQUE,
     name TEXT NOT NULL,
     description TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -74,7 +80,6 @@ CREATE TABLE IF NOT EXISTS order_items (
     quantity INTEGER NOT NULL DEFAULT 1,
     item_subtotal_cents INTEGER NOT NULL,
     item_tax_cents INTEGER,
-    essential_flag INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     FOREIGN KEY(order_id) REFERENCES orders(order_id),

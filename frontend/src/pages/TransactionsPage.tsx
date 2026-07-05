@@ -1,28 +1,23 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { ColumnDef } from "@tanstack/react-table";
 import { useNavigate } from "react-router-dom";
 import { formatMoney, listTransactions } from "../api";
 import type { RetailerTransaction } from "../types";
 import { DataTable } from "../components/DataTable";
+import { useListQuery } from "../hooks/useListQuery";
 
 export function TransactionsPage() {
-  const [rows, setRows] = useState<RetailerTransaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [startDate, setStartDate] = useState("2000-01-01");
   const [endDate, setEndDate] = useState("2100-01-01");
   const [globalFilter, setGlobalFilter] = useState("");
   const navigate = useNavigate();
 
-  useEffect(() => {
-    setLoading(true);
-    setError("");
-    listTransactions({ search, start_date: startDate, end_date: endDate, limit: 1000 })
-      .then((res) => setRows(res.rows))
-      .catch(() => setError("Failed to load transactions"))
-      .finally(() => setLoading(false));
-  }, [search, startDate, endDate]);
+  const { rows, loading, error } = useListQuery<RetailerTransaction>(
+    listTransactions,
+    { search, start_date: startDate, end_date: endDate, limit: 1000 },
+    "Failed to load transactions"
+  );
 
   const columns = useMemo<ColumnDef<RetailerTransaction>[]>(
     () => [

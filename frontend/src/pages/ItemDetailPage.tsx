@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { formatMoney, getItem, getItemTransactions } from "../api";
 import type { RetailerTransaction, OrderItem } from "../types";
+import { Panel } from "../components/Panel";
+import { DetailSummaryList } from "../components/DetailSummaryList";
+import { SimpleTable } from "../components/SimpleTable";
 
 export function ItemDetailPage() {
   const { itemId = "" } = useParams();
@@ -22,96 +25,73 @@ export function ItemDetailPage() {
         <Link to="/items">← Back to Order Items</Link>
       </p>
       <div className="order-detail-grid">
-        <article className="panel order-summary-card">
+        <Panel className="order-summary-card">
           <h2>Item Summary</h2>
-          <p>
-            <strong>Item ID:</strong> {item.item_id}
-          </p>
-          <p title={item.title}>
-            <strong>Title:</strong> {item.title}
-          </p>
-          <p>
-            <strong>Qty:</strong> {item.quantity}
-          </p>
-          <p>
-            <strong>Subtotal:</strong> {formatMoney(item.item_subtotal_cents)}
-          </p>
-          <p>
-            <strong>Tax:</strong> {formatMoney(item.item_tax_cents)}
-          </p>
-          <p>
-            <strong>Parent Order:</strong> <Link to={`/orders/${item.order_id}`}>{item.order_id}</Link>
-          </p>
-          <p>
-            <strong>Order URL:</strong>{" "}
-            <a href={item.order_url ?? "#"} target="_blank" rel="noreferrer">
-              {item.order_url ?? "n/a"}
-            </a>
-          </p>
-        </article>
+          <DetailSummaryList
+            items={[
+              { label: "Item ID", value: item.item_id },
+              { label: "Title", value: item.title, title: item.title },
+              { label: "Qty", value: item.quantity },
+              { label: "Subtotal", value: formatMoney(item.item_subtotal_cents) },
+              { label: "Tax", value: formatMoney(item.item_tax_cents) },
+              { label: "Parent Order", value: <Link to={`/orders/${item.order_id}`}>{item.order_id}</Link> },
+              {
+                label: "Order URL",
+                value: (
+                  <a href={item.order_url ?? "#"} target="_blank" rel="noreferrer">
+                    {item.order_url ?? "n/a"}
+                  </a>
+                ),
+              },
+            ]}
+          />
+        </Panel>
 
-        <article className="panel">
+        <Panel>
           <h3>Associated Transactions</h3>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Transaction</th>
-                  <th>Date</th>
-                  <th>Amount</th>
-                  <th>Allocated</th>
-                  <th>Label</th>
-                </tr>
-              </thead>
-              <tbody>
-                {txns.map((t) => (
-                  <tr key={t.retailer_txn_id}>
-                    <td>
-                      <Link to={`/transactions/${t.retailer_txn_id}`}>{t.retailer_txn_id}</Link>
-                    </td>
-                    <td>{t.txn_date ?? "n/a"}</td>
-                    <td>{formatMoney(t.amount_cents)}</td>
-                    <td>{formatMoney(t.allocated_amount_cents)}</td>
-                    <td className="truncate-cell" title={t.raw_label ?? ""}>
-                      {t.raw_label ?? "n/a"}
-                    </td>
-                  </tr>
-                ))}
-                {txns.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="muted">
-                      No transactions found.
-                    </td>
-                  </tr>
-                ) : null}
-              </tbody>
-            </table>
-          </div>
-        </article>
+          <SimpleTable
+            columns={[
+              {
+                header: "Transaction",
+                cell: (t: RetailerTransaction) => (
+                  <Link to={`/transactions/${t.retailer_txn_id}`}>{t.retailer_txn_id}</Link>
+                ),
+              },
+              { header: "Date", cell: (t) => t.txn_date ?? "n/a" },
+              { header: "Amount", cell: (t) => formatMoney(t.amount_cents) },
+              { header: "Allocated", cell: (t) => formatMoney(t.allocated_amount_cents) },
+              {
+                header: "Label",
+                cell: (t) => t.raw_label ?? "n/a",
+                className: "truncate-cell",
+                title: (t) => t.raw_label ?? "",
+              },
+            ]}
+            rows={txns}
+            rowKey={(t) => t.retailer_txn_id}
+            emptyMessage="No transactions found."
+          />
+        </Panel>
 
-        <article className="panel">
+        <Panel>
           <h3>Order Context</h3>
-          <p>
-            <strong>Order ID:</strong> <Link to={`/orders/${item.order_id}`}>{item.order_id}</Link>
-          </p>
-          <p>
-            <strong>Order Date:</strong> {item.order_date ?? "n/a"}
-          </p>
-          <p>
-            <strong>Order Total:</strong> {formatMoney(item.order_total_cents)}
-          </p>
-          <p>
-            <strong>Order Tax:</strong> {formatMoney(item.tax_cents)}
-          </p>
-          <p>
-            <strong>Primary Txn:</strong>{" "}
-            {item.retailer_transaction_id ? (
-              <Link to={`/transactions/${item.retailer_transaction_id}`}>{item.retailer_transaction_id}</Link>
-            ) : (
-              "n/a"
-            )}
-          </p>
-        </article>
+          <DetailSummaryList
+            items={[
+              { label: "Order ID", value: <Link to={`/orders/${item.order_id}`}>{item.order_id}</Link> },
+              { label: "Order Date", value: item.order_date ?? "n/a" },
+              { label: "Order Total", value: formatMoney(item.order_total_cents) },
+              { label: "Order Tax", value: formatMoney(item.tax_cents) },
+              {
+                label: "Primary Txn",
+                value: item.retailer_transaction_id ? (
+                  <Link to={`/transactions/${item.retailer_transaction_id}`}>{item.retailer_transaction_id}</Link>
+                ) : (
+                  "n/a"
+                ),
+              },
+            ]}
+          />
+        </Panel>
       </div>
     </section>
   );

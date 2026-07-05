@@ -4,16 +4,16 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from amazon_spending.cli import _handle_collect
-from amazon_spending.db import connect, init_db
-from amazon_spending.retailers.amazon import (
+from budget_buddy.cli import _handle_collect
+from budget_buddy.db import connect, init_db
+from budget_buddy.retailers.amazon import (
     ListingOrderSummary,
     _build_collect_result,
     _extract_listing_order_summaries_from_html,
     _merge_listing_orders,
     _should_skip_detail_fetch,
 )
-from amazon_spending.retailers.base import CollectResult, ParsedItem, ParsedOrder, ParsedRetailerTransaction
+from budget_buddy.retailers.base import CollectResult, ParsedItem, ParsedOrder, ParsedRetailerTransaction
 
 
 class _FakeCollector:
@@ -176,7 +176,7 @@ class AmazonCollectLogicTests(unittest.TestCase):
         fake_collector = _FakeCollector()
 
         try:
-            with patch("amazon_spending.cli.REGISTRY", {"amazon": fake_collector}):
+            with patch("budget_buddy.cli.REGISTRY", {"amazon": fake_collector}):
                 with redirect_stdout(io.StringIO()):
                     _handle_collect(args, conn, "amazon")
         finally:

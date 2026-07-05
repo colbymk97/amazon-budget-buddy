@@ -1,167 +1,113 @@
-import { useEffect, useMemo, useState } from "react";
-import { cancelSync, getHealth, getSyncStatus, startSync, type SyncStatus } from "../api";
+import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import {
+  formatMoney,
+  getHealth,
+  getRetailerStatus,
+  getSpendByCategory,
+  getSpendByMonth,
+  getSpendByRetailer,
+} from "../api";
+import type { RetailerStatus, SpendByCategoryReport, SpendByMonthReport, SpendByRetailerReport } from "../types";
+import { Panel } from "../components/Panel";
+import { StatCard } from "../components/StatCard";
+import { SpendTrendChart } from "../components/charts/SpendTrendChart";
+import { BreakdownChart } from "../components/charts/BreakdownChart";
+import { isoDate, monthStart, shiftMonth } from "../lib/dates";
+import { colorForRetailer } from "../lib/chartTheme";
 
 export function HomePage() {
-  const [status, setStatus] = useState<string>("loading");
-  const [sync, setSync] = useState<SyncStatus | null>(null);
-  const [starting, setStarting] = useState(false);
+  const [apiStatus, setApiStatus] = useState("loading");
+  const [retailers, setRetailers] = useState<RetailerStatus[]>([]);
+  const [monthly, setMonthly] = useState<SpendByMonthReport | null>(null);
+  const [byRetailer, setByRetailer] = useState<SpendByRetailerReport | null>(null);
+  const [byCategory, setByCategory] = useState<SpendByCategoryReport | null>(null);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
     getHealth()
-      .then((r) => setStatus(r.status))
-      .catch(() => setStatus("error"));
+      .then((r) => setApiStatus(r.status))
+      .catch(() => setApiStatus("error"));
   }, []);
 
   useEffect(() => {
-    let active = true;
-    let timer: number | null = null;
+    const start = isoDate(monthStart(shiftMonth(new Date(), -11)));
+    const end = isoDate(new Date());
 
-    const poll = async () => {
-      try {
-        const s = await getSyncStatus();
-        if (!active) return;
-        setSync(s);
-      } catch {
-        if (!active) return;
-        setError("Failed to fetch sync status.");
-      } finally {
-        if (active) {
-          timer = window.setTimeout(poll, 1200);
-        }
-      }
-    };
-    poll();
-    return () => {
-      active = false;
-      if (timer) window.clearTimeout(timer);
-    };
+    setLoading(true);
+    setError("");
+    Promise.all([
+      getRetailerStatus(),
+      getSpendByMonth({ start_date: start, end_date: end }),
+      getSpendByRetailer({ start_date: start, end_date: end }),
+      getSpendByCategory({ start_date: start, end_date: end }),
+    ])
+      .then(([r, m, byR, byC]) => {
+        setRetailers(r.retailers);
+        setMonthly(m);
+        setByRetailer(byR);
+        setByCategory(byC);
+      })
+      .catch(() => setError("Failed to load dashboard data"))
+      .finally(() => setLoading(false));
   }, []);
 
-  const canStart = useMemo(() => !starting && !sync?.running, [starting, sync?.running]);
-  const progress = Math.max(0, Math.min(100, sync?.progress ?? 0));
-
-  const onStartSync = async () => {
-    setError("");
-    setStarting(true);
-    try {
-      await startSync();
-      const s = await getSyncStatus();
-      setSync(s);
-    } catch {
-      setError("Failed to start import.");
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const onCancelSync = async () => {
-    setError("");
-    try {
-      await cancelSync();
-      const s = await getSyncStatus();
-      setSync(s);
-    } catch {
-      setError("Failed to request cancellation.");
-    }
-  };
+  const totalNetCents = monthly?.months.reduce((sum, m) => sum + m.net_amount_cents, 0) ?? 0;
+  const totalOrders = monthly?.months.reduce((sum, m) => sum + m.order_count, 0) ?? 0;
+  const latestRetailer = retailers[0];
 
   return (
     <section className="dashboard-grid">
-      <article className="panel hero-panel">
-        <div className="hero-copy">
-          <p className="eyebrow">Command Center</p>
-          <h2>Control imports without leaving the dashboard.</h2>
-          <p className="muted">
-            The new shell emphasizes status visibility, room for new modules, and a steadier visual rhythm for
-            everyday use.
-          </p>
-        </div>
-
-        <div className="hero-status">
-          <div className={`status-pill ${status === "ok" ? "good" : "warn"}`}>API {status}</div>
-          <div className={`status-pill ${sync?.running ? "info" : "neutral"}`}>
-            {sync?.running ? "Import active" : "Importer idle"}
+      <Panel>
+        <div className="status-strip">
+          <div className={`status-pill ${apiStatus === "ok" ? "good" : "warn"}`}>API {apiStatus}</div>
+          <div className="status-pill neutral">
+            Last sync: {latestRetailer?.last_import_finished_at ?? "never"}
           </div>
-          <div className="status-pill neutral">Stage {sync?.stage ?? "waiting"}</div>
+          <Link to="/status" className="status-strip-link">
+            View sync &amp; import status →
+          </Link>
         </div>
-
-        <div className="sync-actions">
-          <button disabled={!canStart} onClick={onStartSync}>
-            {starting ? "Starting..." : sync?.running ? "Import Running..." : "Import New Data"}
-          </button>
-          <button disabled={!sync?.running} onClick={onCancelSync}>
-            Terminate Import
-          </button>
-          {sync?.running ? <span className="muted">Importing in background...</span> : null}
-        </div>
-
-        {sync ? (
-          <div className="sync-progress">
-            <div className="progress-labels">
-              <span>{sync.stage}</span>
-              <strong>{progress}%</strong>
-            </div>
-            <progress value={progress} max={100} />
-            {sync.cancel_requested ? <p className="muted">Cancellation requested...</p> : null}
-            <p className="muted">{sync.notes ?? ""}</p>
-            {!sync.running && (sync.new_transactions_added ?? 0) > 0 ? (
-              <p>
-                Added <strong>{sync.new_transactions_added}</strong> new transaction(s).
-              </p>
-            ) : null}
-            {!sync.running && (sync.new_orders_added ?? 0) > 0 ? (
-              <p>
-                Found <strong>{sync.new_orders_added}</strong> order(s)
-                {sync.sync_since_date ? (
-                  <>
-                    {" "}
-                    since <strong>{sync.sync_since_date}</strong>
-                  </>
-                ) : null}
-                .
-              </p>
-            ) : null}
-            {!sync.running && (sync.new_transactions_added ?? 0) === 0 && sync.status === "ok" ? (
-              <p>
-                No new orders were found
-                {sync.sync_since_date ? (
-                  <>
-                    {" "}
-                    since <strong>{sync.sync_since_date}</strong>
-                  </>
-                ) : (
-                  " since the last import"
-                )}
-                .
-              </p>
-            ) : null}
-            {!sync.running && sync.status === "cancelled" ? <p>Import terminated by user.</p> : null}
-            {sync.error ? <p className="error">{sync.error}</p> : null}
-          </div>
-        ) : null}
-
-        {error ? <p className="error">{error}</p> : null}
-      </article>
+      </Panel>
 
       <div className="dashboard-stats">
-        <article className="panel stat-card">
-          <p className="eyebrow">API</p>
-          <p className="stat-value">{status}</p>
-          <p className="muted">Backend health check</p>
-        </article>
+        <StatCard label="Net Spend (12mo)" value={formatMoney(totalNetCents)} caption="Trailing 12 months" />
+        <StatCard label="Orders (12mo)" value={totalOrders} caption="Trailing 12 months" />
+        <StatCard
+          label="Latest Order"
+          value={latestRetailer?.latest_order_date ?? "n/a"}
+          caption={latestRetailer?.retailer ?? ""}
+        />
+      </div>
 
-        <article className="panel stat-card">
-          <p className="eyebrow">Latest Orders</p>
-          <p className="stat-value">{sync?.last_order_date ?? "n/a"}</p>
-          <p className="muted">Most recent order date</p>
-        </article>
+      {loading ? <p>Loading dashboard...</p> : null}
+      {error ? <p className="error">{error}</p> : null}
 
-        <article className="panel stat-card">
-          <p className="eyebrow">Latest Transactions</p>
-          <p className="stat-value">{sync?.last_transaction_date ?? "n/a"}</p>
-          <p className="muted">Most recent transaction date</p>
-        </article>
+      <Panel className="chart-panel">
+        <h3>Spend Trend</h3>
+        {monthly ? <SpendTrendChart months={monthly.months} retailers={monthly.retailers} /> : null}
+      </Panel>
+
+      <div className="dashboard-charts-grid">
+        <Panel className="chart-panel">
+          <h3>By Retailer</h3>
+          {byRetailer ? (
+            <BreakdownChart
+              items={byRetailer.retailers.map((r) => ({ name: r.retailer, valueCents: r.net_amount_cents }))}
+              colorFor={colorForRetailer}
+            />
+          ) : null}
+        </Panel>
+
+        <Panel className="chart-panel">
+          <h3>By Category</h3>
+          {byCategory ? (
+            <BreakdownChart
+              items={byCategory.rows.map((r) => ({ name: r.name, valueCents: r.net_amount_cents }))}
+            />
+          ) : null}
+        </Panel>
       </div>
     </section>
   );

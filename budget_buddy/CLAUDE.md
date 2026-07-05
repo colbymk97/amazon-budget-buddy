@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Working conventions
+
+This is a single-owner personal project with no external API consumers. When new work supersedes old code (old endpoints, old UI copy, old components, old DB columns/tables), **delete it outright** — don't keep it around for backwards compatibility, don't add deprecation shims, don't leave "legacy" code paths. There is no user base to protect. Still back up the real local SQLite DB before destructive schema changes.
+
 ## Commands
 
 ### Python Backend
@@ -12,12 +16,12 @@ pip install -e ".[dev]"
 playwright install chromium
 
 # Run CLI
-amazon-spending init-db
-amazon-spending collect --retailer amazon
-amazon-spending db-status
+budget-buddy init-db
+budget-buddy collect --retailer amazon
+budget-buddy db-status
 
 # API server
-uvicorn amazon_spending.api:app --reload --host 127.0.0.1 --port 8000
+uvicorn budget_buddy.api:app --reload --host 127.0.0.1 --port 8000
 
 # Tests
 pytest
@@ -72,7 +76,7 @@ All tables with retailer-specific data have a `retailer` column (multi-retailer 
 
 ### Frontend
 
-React 18 + Vite + React Router + TanStack Table + Tailwind CSS. API calls go to `http://localhost:8000`. Pages map to: orders, items, transactions, reports, admin (sync control), and a baby-sitter spending tracker.
+React 18 + Vite + React Router + TanStack Table + Recharts, hand-written CSS (no utility framework). API calls go to `http://localhost:8000`. Pages map to: dashboard (spend charts), status (sync control + Actual reconciliation), orders, items, transactions, reports, and budget categories (read-only mirror of Actual's categories).
 
 ## Configuration
 

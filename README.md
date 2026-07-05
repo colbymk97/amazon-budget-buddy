@@ -1,4 +1,4 @@
-# amazon-spending
+# Budget Buddy
 
 Local-first tooling to collect and store retailer order history in SQLite and
 sync it to Actual Budget for reconciliation. Supports Amazon today, with a
@@ -9,7 +9,7 @@ All data stays on your machine — no cloud services required.
 
 ### Install into a virtual environment (recommended)
 
-This registers the `amazon-spending` command so you can run it from anywhere
+This registers the `budget-buddy` command so you can run it from anywhere
 while the venv is active. Run these from the repo root:
 
 ```bash
@@ -25,11 +25,11 @@ playwright install chromium
 > the python.org Python 3.9 installer. Skipping them causes a
 > `No module named pip` error during install.
 
-The `amazon-spending` command is now available whenever the venv is active:
+The `budget-buddy` command is now available whenever the venv is active:
 
 ```bash
-amazon-spending --version
-amazon-spending init-db
+budget-buddy --version
+budget-buddy init-db
 ```
 
 To activate the venv in a new terminal session:
@@ -41,17 +41,17 @@ source .venv/bin/activate
 ### Run without installing (using the module directly)
 
 You can also invoke the package directly as a Python module from the repo root
-without registering the `amazon-spending` entry-point:
+without registering the `budget-buddy` entry-point:
 
 ```bash
 source .venv/bin/activate
-python3 -m amazon_spending init-db
-python3 -m amazon_spending collect --retailer amazon --order-limit 50
-python3 -m amazon_spending db-status
+python3 -m budget_buddy init-db
+python3 -m budget_buddy collect --retailer amazon --order-limit 50
+python3 -m budget_buddy db-status
 ```
 
-All commands and flags are identical — `python3 -m amazon_spending` is a
-drop-in equivalent to `amazon-spending`.
+All commands and flags are identical — `python3 -m budget_buddy` is a
+drop-in equivalent to `budget-buddy`.
 
 ---
 
@@ -59,13 +59,13 @@ drop-in equivalent to `amazon-spending`.
 
 ```bash
 # 1. Initialize the database
-amazon-spending init-db
+budget-buddy init-db
 
 # 2. Collect your Amazon orders (headless browser, auto-auth fallback)
-amazon-spending collect --retailer amazon --order-limit 100
+budget-buddy collect --retailer amazon --order-limit 100
 
 # 3. Check the current DB state
-amazon-spending db-status
+budget-buddy db-status
 ```
 
 ---
@@ -73,7 +73,7 @@ amazon-spending db-status
 ## CLI Reference
 
 ```
-amazon-spending [--db PATH] [--version] [-h] <command> [options]
+budget-buddy [--db PATH] [--version] [-h] <command> [options]
 ```
 
 ### Global Options
@@ -84,7 +84,7 @@ amazon-spending [--db PATH] [--version] [-h] <command> [options]
 | `--version` | — | Print version and exit |
 | `-h, --help` | — | Show help message and exit |
 
-Run `amazon-spending <command> --help` for detailed help on any command.
+Run `budget-buddy <command> --help` for detailed help on any command.
 
 ---
 
@@ -93,7 +93,7 @@ Run `amazon-spending <command> --help` for detailed help on any command.
 Initialize or migrate the SQLite schema.
 
 ```
-amazon-spending init-db
+budget-buddy init-db
 ```
 
 Safe to run on an existing database — missing tables and columns are added
@@ -103,8 +103,8 @@ without touching existing data. Also runs the multi-retailer migration
 **Examples**
 
 ```bash
-amazon-spending init-db
-amazon-spending --db ~/my-data.sqlite3 init-db
+budget-buddy init-db
+budget-buddy --db ~/my-data.sqlite3 init-db
 ```
 
 ---
@@ -114,7 +114,7 @@ amazon-spending --db ~/my-data.sqlite3 init-db
 Scrape retailer order history into the local database.
 
 ```
-amazon-spending collect --retailer <name> [options]
+budget-buddy collect --retailer <name> [options]
 ```
 
 **Supported retailers:** `amazon`
@@ -163,28 +163,28 @@ amazon-spending collect --retailer <name> [options]
 
 ```bash
 # Collect the most recent 50 Amazon orders
-amazon-spending collect --retailer amazon --order-limit 50
+budget-buddy collect --retailer amazon --order-limit 50
 
 # Collect a specific date range
-amazon-spending collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
+budget-buddy collect --retailer amazon --start-date 2024-01-01 --end-date 2024-06-30
 
 # First-time login / MFA — use a visible browser
-amazon-spending collect --retailer amazon --headed --order-limit 20
+budget-buddy collect --retailer amazon --headed --order-limit 20
 
 # Fastest incremental sync
-amazon-spending collect --retailer amazon --stop-on-known
+budget-buddy collect --retailer amazon --stop-on-known
 
 # Safer incremental sync with extra overlap
-amazon-spending collect --retailer amazon --stop-on-known --overlap-match-threshold 2
+budget-buddy collect --retailer amazon --stop-on-known --overlap-match-threshold 2
 
 # Reduce raw snapshot disk usage
-amazon-spending collect --retailer amazon --save-raw on-error --raw-retention-runs 10
+budget-buddy collect --retailer amazon --save-raw on-error --raw-retention-runs 10
 
 # Re-parse saved HTML without launching a browser
-amazon-spending collect --retailer amazon --test-run
+budget-buddy collect --retailer amazon --test-run
 
 # Machine-readable JSON output
-amazon-spending collect --retailer amazon --order-limit 10 --json
+budget-buddy collect --retailer amazon --order-limit 10 --json
 ```
 
 **Deprecated alias:** `collect-amazon` behaves identically to `collect --retailer amazon`.
@@ -196,7 +196,7 @@ amazon-spending collect --retailer amazon --order-limit 10 --json
 Store Actual Budget settings in the local SQLite database.
 
 ```
-amazon-spending actual-configure [options]
+budget-buddy actual-configure [options]
 ```
 
 | Flag | Default | Description |
@@ -212,9 +212,9 @@ amazon-spending actual-configure [options]
 **Examples**
 
 ```bash
-amazon-spending actual-configure --base-url http://localhost:5006 --file "My Budget"
-amazon-spending actual-configure --account-name "Chase Sapphire"
-amazon-spending actual-configure --show
+budget-buddy actual-configure --base-url http://localhost:5006 --file "My Budget"
+budget-buddy actual-configure --account-name "Chase Sapphire"
+budget-buddy actual-configure --show
 ```
 
 ---
@@ -224,7 +224,7 @@ amazon-spending actual-configure --show
 Push unsynced retailer transactions to Actual Budget using the stored config.
 
 ```
-amazon-spending actual-sync [--dry-run] [--json]
+budget-buddy actual-sync [--dry-run] [--json]
 ```
 
 | Flag | Default | Description |
@@ -235,8 +235,8 @@ amazon-spending actual-sync [--dry-run] [--json]
 **Examples**
 
 ```bash
-amazon-spending actual-sync --dry-run
-amazon-spending actual-sync
+budget-buddy actual-sync --dry-run
+budget-buddy actual-sync
 ```
 
 ---
@@ -245,7 +245,7 @@ amazon-spending actual-sync
 
 ```bash
 # Terminal 1 — API server
-uvicorn amazon_spending.api:app --reload --host 127.0.0.1 --port 8000
+uvicorn budget_buddy.api:app --reload --host 127.0.0.1 --port 8000
 
 # Terminal 2 — React frontend
 cd frontend && npm install && npm run dev
@@ -260,10 +260,10 @@ cd frontend && npm install && npm run dev
 
 ## Adding a New Retailer
 
-1. Create `amazon_spending/retailers/<name>.py` implementing `RetailerCollector`:
+1. Create `budget_buddy/retailers/<name>.py` implementing `RetailerCollector`:
 
 ```python
-from amazon_spending.retailers.base import CollectResult, RetailerCollector
+from budget_buddy.retailers.base import CollectResult, RetailerCollector
 
 class TargetCollector(RetailerCollector):
     RETAILER_ID = "target"
@@ -273,7 +273,7 @@ class TargetCollector(RetailerCollector):
         ...
 ```
 
-2. Register it in `amazon_spending/retailers/__init__.py`:
+2. Register it in `budget_buddy/retailers/__init__.py`:
 
 ```python
 from .target import TargetCollector

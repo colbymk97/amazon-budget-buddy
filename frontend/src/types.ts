@@ -36,6 +36,7 @@ export type RetailerTransaction = {
 export type OrderItem = {
   item_id: string;
   order_id: string;
+  retailer?: string | null;
   order_date?: string | null;
   order_url?: string | null;
   title: string;
@@ -49,8 +50,11 @@ export type OrderItem = {
   method?: string | null;
 };
 
+// budget_categories/budget_subcategories are a read-only mirror of Actual
+// Budget's own category groups/categories — never created by hand here.
 export type BudgetCategory = {
   category_id: number;
+  actual_group_id?: string | null;
   name: string;
   description?: string | null;
   subcategory_count?: number;
@@ -59,7 +63,86 @@ export type BudgetCategory = {
 export type BudgetSubcategory = {
   subcategory_id: number;
   category_id: number;
+  actual_category_id?: string | null;
   category_name?: string;
   name: string;
   description?: string | null;
+};
+
+export type RetailerStatus = {
+  retailer: string;
+  orders: number;
+  transactions: number;
+  first_order_date?: string | null;
+  latest_order_date?: string | null;
+  last_import_finished_at?: string | null;
+  last_import_status?: string | null;
+  bound_account?: string | null;
+};
+
+export type ActualStatus = {
+  configured: boolean;
+  base_url?: string | null;
+  file?: string | null;
+  account_name?: string | null;
+  pending: number;
+  total_transactions: number;
+  synced: number;
+  skipped: number;
+  incomplete: number;
+  last_synced_at?: string | null;
+  skip_reasons: { reason: string | null; count: number }[];
+};
+
+export type MonthlyRetailerBreakdown = {
+  order_count: number;
+  gross_order_cents: number;
+  txn_count: number;
+  net_amount_cents: number;
+};
+
+export type MonthlySpend = {
+  month: string;
+  order_count: number;
+  gross_order_cents: number;
+  txn_count: number;
+  net_amount_cents: number;
+  by_retailer: Record<string, MonthlyRetailerBreakdown>;
+};
+
+export type SpendByMonthReport = {
+  start_date: string;
+  end_date: string;
+  retailers: string[];
+  months: MonthlySpend[];
+};
+
+export type RetailerSpend = {
+  retailer: string;
+  order_count: number;
+  gross_order_cents: number;
+  first_order_date?: string | null;
+  latest_order_date?: string | null;
+  txn_count: number;
+  net_amount_cents: number;
+};
+
+export type SpendByRetailerReport = {
+  start_date: string;
+  end_date: string;
+  retailers: RetailerSpend[];
+};
+
+export type CategorySpend = {
+  id: number | null;
+  name: string;
+  txn_count: number;
+  net_amount_cents: number;
+};
+
+export type SpendByCategoryReport = {
+  start_date: string;
+  end_date: string;
+  category_id: number | null;
+  rows: CategorySpend[];
 };

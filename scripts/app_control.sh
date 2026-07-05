@@ -42,7 +42,7 @@ start_api() {
   fi
   (
     cd "$ROOT_DIR"
-    nohup "$PY" -m uvicorn amazon_spending.api:app --host "$API_HOST" --port "$API_PORT" \
+    nohup "$PY" -m uvicorn budget_buddy.api:app --host "$API_HOST" --port "$API_PORT" \
       >"$LOG_DIR/api.log" 2>&1 &
     echo $! >"$API_PID_FILE"
   )

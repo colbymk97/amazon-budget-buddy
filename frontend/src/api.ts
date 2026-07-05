@@ -1,4 +1,15 @@
-import type { RetailerTransaction, BudgetCategory, BudgetSubcategory, Order, OrderItem } from "./types";
+import type {
+  RetailerTransaction,
+  BudgetCategory,
+  BudgetSubcategory,
+  Order,
+  OrderItem,
+  RetailerStatus,
+  ActualStatus,
+  SpendByMonthReport,
+  SpendByRetailerReport,
+  SpendByCategoryReport,
+} from "./types";
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -131,18 +142,10 @@ export async function assignTransactionBudget(
   return res.json() as Promise<RetailerTransaction>;
 }
 
+// budget_categories/budget_subcategories are a read-only mirror of Actual's
+// own categories — refresh via syncActualCategories(), never created by hand.
 export function listBudgetCategories() {
   return getJson<RowsResponse<BudgetCategory>>(`/budget/categories`);
-}
-
-export async function createBudgetCategory(payload: { name: string; description?: string }) {
-  const res = await fetch(`${API_BASE}/budget/categories`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<BudgetCategory>;
 }
 
 export function listBudgetSubcategories(category_id?: number) {
@@ -150,16 +153,39 @@ export function listBudgetSubcategories(category_id?: number) {
   return getJson<RowsResponse<BudgetSubcategory>>(`/budget/subcategories${q ? `?${q}` : ""}`);
 }
 
-export async function createBudgetSubcategory(payload: {
-  category_id: number;
-  name: string;
-  description?: string;
-}) {
-  const res = await fetch(`${API_BASE}/budget/subcategories`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload)
-  });
+export function getRetailerStatus() {
+  return getJson<{ retailers: RetailerStatus[] }>(`/status/retailers`);
+}
+
+export function getActualStatus() {
+  return getJson<ActualStatus>(`/actual/status`);
+}
+
+export async function syncToActual(dryRun: boolean) {
+  const res = await fetch(`${API_BASE}/actual/sync?dry_run=${dryRun}`, { method: "POST" });
   if (!res.ok) throw new Error(`API ${res.status}`);
-  return res.json() as Promise<BudgetSubcategory>;
+  return res.json();
+}
+
+export async function syncActualCategories() {
+  const res = await fetch(`${API_BASE}/actual/categories/sync`, { method: "POST" });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json() as Promise<{ categories_synced: number }>;
+}
+
+export function getSpendByMonth(params: { start_date?: string; end_date?: string } = {}) {
+  const q = toQuery(params);
+  return getJson<SpendByMonthReport>(`/reports/spend-by-month${q ? `?${q}` : ""}`);
+}
+
+export function getSpendByRetailer(params: { start_date?: string; end_date?: string } = {}) {
+  const q = toQuery(params);
+  return getJson<SpendByRetailerReport>(`/reports/spend-by-retailer${q ? `?${q}` : ""}`);
+}
+
+export function getSpendByCategory(
+  params: { start_date?: string; end_date?: string; category_id?: number } = {}
+) {
+  const q = toQuery(params);
+  return getJson<SpendByCategoryReport>(`/reports/spend-by-category${q ? `?${q}` : ""}`);
 }

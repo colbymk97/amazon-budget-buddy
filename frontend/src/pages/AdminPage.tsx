@@ -1,10 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  createBudgetCategory,
-  createBudgetSubcategory,
-  listBudgetCategories,
-  listBudgetSubcategories
-} from "../api";
+import { useEffect, useState } from "react";
+import { listBudgetCategories, listBudgetSubcategories, syncActualCategories } from "../api";
 import type { BudgetCategory, BudgetSubcategory } from "../types";
 
 export function AdminPage() {
@@ -12,14 +7,8 @@ export function AdminPage() {
   const [subcategories, setSubcategories] = useState<BudgetSubcategory[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
-  const [categoryName, setCategoryName] = useState("");
-  const [categoryDescription, setCategoryDescription] = useState("");
-  const [subcategoryCategoryId, setSubcategoryCategoryId] = useState<number | "">("");
-  const [subcategoryName, setSubcategoryName] = useState("");
-  const [subcategoryDescription, setSubcategoryDescription] = useState("");
-  const [savingCategory, setSavingCategory] = useState(false);
-  const [savingSubcategory, setSavingSubcategory] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState("");
 
   const loadAll = async () => {
     setLoading(true);
@@ -28,11 +17,8 @@ export function AdminPage() {
       const [c, s] = await Promise.all([listBudgetCategories(), listBudgetSubcategories()]);
       setCategories(c.rows);
       setSubcategories(s.rows);
-      if (c.rows.length > 0 && subcategoryCategoryId === "") {
-        setSubcategoryCategoryId(c.rows[0].category_id);
-      }
     } catch {
-      setError("Failed to load budget metadata.");
+      setError("Failed to load budget categories.");
     } finally {
       setLoading(false);
     }
@@ -42,123 +28,47 @@ export function AdminPage() {
     loadAll();
   }, []);
 
-  const categoryOptions = useMemo(() => categories, [categories]);
-
-  const onCreateCategory = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!categoryName.trim()) return;
+  const onRefreshFromActual = async () => {
+    setSyncing(true);
+    setSyncMessage("");
     setError("");
-    setSavingCategory(true);
     try {
-      await createBudgetCategory({
-        name: categoryName.trim(),
-        description: categoryDescription.trim() || undefined
-      });
-      setCategoryName("");
-      setCategoryDescription("");
+      const result = await syncActualCategories();
+      setSyncMessage(`Synced ${result.categories_synced} categories from Actual.`);
       await loadAll();
     } catch {
-      setError("Could not create category (maybe duplicate name).");
+      setError("Could not refresh categories from Actual. Is it configured and reachable?");
     } finally {
-      setSavingCategory(false);
-    }
-  };
-
-  const onCreateSubcategory = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!subcategoryName.trim() || subcategoryCategoryId === "") return;
-    setError("");
-    setSavingSubcategory(true);
-    try {
-      await createBudgetSubcategory({
-        category_id: Number(subcategoryCategoryId),
-        name: subcategoryName.trim(),
-        description: subcategoryDescription.trim() || undefined
-      });
-      setSubcategoryName("");
-      setSubcategoryDescription("");
-      await loadAll();
-    } catch {
-      setError("Could not create subcategory (maybe duplicate in category).");
-    } finally {
-      setSavingSubcategory(false);
+      setSyncing(false);
     }
   };
 
   return (
     <section className="report-layout">
       <article className="panel">
-        <h2>Admin: Budget Metadata</h2>
-        <p className="muted">Create and manage categories/subcategories used for transaction budgeting.</p>
+        <h2>Budget Categories</h2>
+        <p className="muted">
+          Categories are mirrored read-only from Actual Budget — pick them there, then pull the latest
+          list here.
+        </p>
+        <button onClick={onRefreshFromActual} disabled={syncing}>
+          {syncing ? "Refreshing..." : "Refresh from Actual"}
+        </button>
+        {syncMessage ? <p className="muted">{syncMessage}</p> : null}
       </article>
-
-      <div className="admin-grid">
-        <article className="panel">
-          <h3>Add Category</h3>
-          <form className="admin-form" onSubmit={onCreateCategory}>
-            <input
-              placeholder="Category name (e.g. Groceries)"
-              value={categoryName}
-              onChange={(e) => setCategoryName(e.target.value)}
-            />
-            <input
-              placeholder="Description (optional)"
-              value={categoryDescription}
-              onChange={(e) => setCategoryDescription(e.target.value)}
-            />
-            <button type="submit" disabled={savingCategory || !categoryName.trim()}>
-              {savingCategory ? "Saving..." : "Create Category"}
-            </button>
-          </form>
-        </article>
-
-        <article className="panel">
-          <h3>Add Subcategory</h3>
-          <form className="admin-form" onSubmit={onCreateSubcategory}>
-            <select
-              value={subcategoryCategoryId}
-              onChange={(e) => setSubcategoryCategoryId(e.target.value ? Number(e.target.value) : "")}
-            >
-              <option value="">Select category</option>
-              {categoryOptions.map((c) => (
-                <option key={c.category_id} value={c.category_id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
-            <input
-              placeholder="Subcategory name (e.g. Produce)"
-              value={subcategoryName}
-              onChange={(e) => setSubcategoryName(e.target.value)}
-            />
-            <input
-              placeholder="Description (optional)"
-              value={subcategoryDescription}
-              onChange={(e) => setSubcategoryDescription(e.target.value)}
-            />
-            <button
-              type="submit"
-              disabled={savingSubcategory || subcategoryCategoryId === "" || !subcategoryName.trim()}
-            >
-              {savingSubcategory ? "Saving..." : "Create Subcategory"}
-            </button>
-          </form>
-        </article>
-      </div>
 
       {loading ? <p>Loading...</p> : null}
       {error ? <p className="error">{error}</p> : null}
 
       <div className="admin-grid">
         <article className="panel">
-          <h3>Categories</h3>
+          <h3>Category Groups</h3>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>ID</th>
                   <th>Name</th>
-                  <th>Description</th>
                   <th>Subcategories</th>
                 </tr>
               </thead>
@@ -167,14 +77,13 @@ export function AdminPage() {
                   <tr key={c.category_id}>
                     <td>{c.category_id}</td>
                     <td>{c.name}</td>
-                    <td>{c.description ?? "n/a"}</td>
                     <td>{c.subcategory_count ?? 0}</td>
                   </tr>
                 ))}
                 {!loading && categories.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="muted">
-                      No categories yet.
+                    <td colSpan={3} className="muted">
+                      No categories yet — configure Actual and click "Refresh from Actual".
                     </td>
                   </tr>
                 ) : null}
@@ -184,15 +93,14 @@ export function AdminPage() {
         </article>
 
         <article className="panel">
-          <h3>Subcategories</h3>
+          <h3>Categories</h3>
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>Category</th>
+                  <th>Group</th>
                   <th>Name</th>
-                  <th>Description</th>
                 </tr>
               </thead>
               <tbody>
@@ -201,13 +109,12 @@ export function AdminPage() {
                     <td>{s.subcategory_id}</td>
                     <td>{s.category_name ?? s.category_id}</td>
                     <td>{s.name}</td>
-                    <td>{s.description ?? "n/a"}</td>
                   </tr>
                 ))}
                 {!loading && subcategories.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="muted">
-                      No subcategories yet.
+                    <td colSpan={3} className="muted">
+                      No categories yet.
                     </td>
                   </tr>
                 ) : null}

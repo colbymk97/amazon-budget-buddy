@@ -5,9 +5,9 @@ from argparse import Namespace
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from amazon_spending.actual_sync import ActualConfig, load_config, save_config
-from amazon_spending.cli import _handle_actual_configure
-from amazon_spending.db import connect, init_db
+from budget_buddy.actual_sync import ActualConfig, load_config, save_config
+from budget_buddy.cli import _handle_actual_configure
+from budget_buddy.db import connect, init_db
 
 
 class ActualConfigTests(unittest.TestCase):
@@ -98,7 +98,7 @@ class ActualConfigTests(unittest.TestCase):
             output_json=False,
         )
 
-        with patch("amazon_spending.cli.getpass.getpass", return_value="prompt-secret"):
+        with patch("budget_buddy.cli.getpass.getpass", return_value="prompt-secret"):
             with redirect_stdout(io.StringIO()):
                 _handle_actual_configure(args, self.conn)
 
@@ -117,7 +117,7 @@ class ActualConfigTests(unittest.TestCase):
             output_json=False,
         )
 
-        with patch("amazon_spending.actual_sync.test_connection") as mock_test_connection:
+        with patch("budget_buddy.actual_sync.test_connection") as mock_test_connection:
             with redirect_stdout(io.StringIO()):
                 _handle_actual_configure(args, self.conn)
 
@@ -138,7 +138,7 @@ class ActualConfigTests(unittest.TestCase):
         )
 
         stderr = io.StringIO()
-        with patch("amazon_spending.actual_sync.test_connection", side_effect=RuntimeError("boom")):
+        with patch("budget_buddy.actual_sync.test_connection", side_effect=RuntimeError("boom")):
             with redirect_stdout(io.StringIO()):
                 with patch("sys.stderr", stderr):
                     with self.assertRaises(SystemExit):

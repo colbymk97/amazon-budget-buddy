@@ -2,14 +2,15 @@ import sys
 import types
 import unittest
 
-from amazon_spending.actual_sync import ActualConfig, sync_to_actual
-from amazon_spending.db import connect, init_db
+from budget_buddy.actual_sync import ActualConfig, sync_to_actual
+from budget_buddy.db import connect, init_db
 
 
 class _FakeActualTransaction:
     amount = -1250
     is_parent = False
     notes = ""
+    category_id = None
 
 
 _FAKE_TRANSACTION = _FakeActualTransaction()
@@ -79,6 +80,7 @@ class ActualSyncTests(unittest.TestCase):
         self.conn.commit()
 
         _FAKE_TRANSACTION.notes = ""
+        _FAKE_TRANSACTION.category_id = None
 
         self.actual_module = types.ModuleType("actual")
         self.actual_module.Actual = _FakeActual
@@ -189,6 +191,80 @@ class ActualSyncTests(unittest.TestCase):
             _FAKE_TRANSACTION.notes,
             "Amazon.com\nAmazon Order: ORDER-1\n• 1x Example Item ($12.50)",
         )
+
+    def test_sync_pushes_local_category_to_actual_on_first_sync(self) -> None:
+        self.conn.execute(
+            "INSERT INTO budget_categories (category_id, actual_group_id, name) VALUES (1, 'GROUP-1', 'Household')"
+        )
+        self.conn.execute(
+            "INSERT INTO budget_subcategories (subcategory_id, category_id, actual_category_id, name) "
+            "VALUES (1, 1, 'CAT-1', 'Groceries')"
+        )
+        self.conn.execute(
+            "UPDATE retailer_transactions SET budget_category_id = 1, budget_subcategory_id = 1 "
+            "WHERE retailer_txn_id = ?",
+            ("TX-1",),
+        )
+        self.conn.commit()
+
+        result = sync_to_actual(
+            self.conn,
+            ActualConfig(base_url="http://example.test", password="secret", file="Budget"),
+        )
+
+        self.assertEqual(result.synced, 1)
+        self.assertEqual(_FAKE_TRANSACTION.category_id, "CAT-1")
+
+    def test_sync_never_overwrites_an_existing_actual_category(self) -> None:
+        self.conn.execute(
+            "INSERT INTO budget_categories (category_id, actual_group_id, name) VALUES (1, 'GROUP-1', 'Household')"
+        )
+        self.conn.execute(
+            "INSERT INTO budget_subcategories (subcategory_id, category_id, actual_category_id, name) "
+            "VALUES (1, 1, 'CAT-1', 'Groceries')"
+        )
+        self.conn.execute(
+            "UPDATE retailer_transactions SET budget_category_id = 1, budget_subcategory_id = 1 "
+            "WHERE retailer_txn_id = ?",
+            ("TX-1",),
+        )
+        self.conn.commit()
+        _FAKE_TRANSACTION.category_id = "CAT-OTHER"  # Actual already has a (different) category
+
+        sync_to_actual(
+            self.conn,
+            ActualConfig(base_url="http://example.test", password="secret", file="Budget"),
+        )
+
+        self.assertEqual(_FAKE_TRANSACTION.category_id, "CAT-OTHER")
+
+    def test_sync_reads_current_actual_category_back_into_local_mirror(self) -> None:
+        self.conn.execute(
+            "INSERT INTO budget_categories (category_id, actual_group_id, name) VALUES (1, 'GROUP-1', 'Household')"
+        )
+        self.conn.execute(
+            "INSERT INTO budget_subcategories (subcategory_id, category_id, actual_category_id, name) "
+            "VALUES (1, 1, 'CAT-1', 'Groceries')"
+        )
+        self.conn.execute(
+            "UPDATE retailer_transactions SET actual_synced_at = datetime('now') WHERE retailer_txn_id = ?",
+            ("TX-1",),
+        )
+        self.conn.commit()
+        _FAKE_TRANSACTION.category_id = "CAT-1"  # categorized directly in Actual after the fact
+
+        sync_to_actual(
+            self.conn,
+            ActualConfig(base_url="http://example.test", password="secret", file="Budget"),
+            refresh_notes=True,
+        )
+
+        row = self.conn.execute(
+            "SELECT budget_category_id, budget_subcategory_id FROM retailer_transactions WHERE retailer_txn_id = ?",
+            ("TX-1",),
+        ).fetchone()
+        self.assertEqual(row["budget_category_id"], 1)
+        self.assertEqual(row["budget_subcategory_id"], 1)
 
 
 if __name__ == "__main__":

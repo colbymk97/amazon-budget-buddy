@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from amazon_spending.api import _should_retry_headed, _sync_completion_note
+from budget_buddy.api import _should_retry_headed, _sync_completion_note
 
 
 class SyncLogicTests(unittest.TestCase):

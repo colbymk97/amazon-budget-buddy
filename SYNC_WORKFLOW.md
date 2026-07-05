@@ -9,7 +9,7 @@ Run these two commands whenever you want to pull in new Amazon charges and annot
 ### Step 1: Collect latest Amazon orders
 
 ```bash
-python3 -m amazon_spending collect --retailer amazon --stop-on-known --headed
+python3 -m budget_buddy collect --retailer amazon --stop-on-known --headed
 ```
 
 - `--stop-on-known` stops as soon as it hits an already-imported order (fast incremental)
@@ -19,7 +19,7 @@ python3 -m amazon_spending collect --retailer amazon --stop-on-known --headed
 ### Step 2: Sync to Actual Budget
 
 ```bash
-python3 -m amazon_spending actual-sync --verbose
+python3 -m budget_buddy actual-sync --verbose
 ```
 
 - Matches each charge to an Actual transaction by exact amount within ±3 days
@@ -29,7 +29,7 @@ python3 -m amazon_spending actual-sync --verbose
 ### Preview before committing
 
 ```bash
-python3 -m amazon_spending actual-sync --dry-run --verbose
+python3 -m budget_buddy actual-sync --dry-run --verbose
 ```
 
 ---
@@ -44,7 +44,7 @@ python3 -m amazon_spending actual-sync --dry-run --verbose
 
 **Update Actual config:**
 ```bash
-python3 -m amazon_spending actual-configure --base-url http://localhost:5006 --file "My Finances"
+python3 -m budget_buddy actual-configure --base-url http://localhost:5006 --file "My Finances"
 ```
 
 ---

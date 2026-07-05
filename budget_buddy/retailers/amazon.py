@@ -1655,7 +1655,7 @@ class AmazonCollector(RetailerCollector):
                 if check_only:
                     return LoginResult(
                         status="login_required",
-                        message="Not logged in. Run 'amazon-spending login --retailer amazon' to authenticate.",
+                        message="Not logged in. Run 'budget-buddy login --retailer amazon' to authenticate.",
                     )
 
                 print(

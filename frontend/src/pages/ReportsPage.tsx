@@ -1,30 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { formatMoney, listItems, listOrders, listTransactions } from "../api";
-import type { RetailerTransaction, Order, OrderItem } from "../types";
-
-function monthStart(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-
-function monthEnd(d: Date): Date {
-  return new Date(d.getFullYear(), d.getMonth() + 1, 0);
-}
-
-function shiftMonth(d: Date, delta: number): Date {
-  return new Date(d.getFullYear(), d.getMonth() + delta, 1);
-}
-
-function isoDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function monthLabel(d: Date): string {
-  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
-}
+import {
+  formatMoney,
+  getSpendByCategory,
+  getSpendByMonth,
+  getSpendByRetailer,
+  listItems,
+  listOrders,
+  listTransactions,
+} from "../api";
+import type {
+  RetailerTransaction,
+  Order,
+  OrderItem,
+  SpendByCategoryReport,
+  SpendByMonthReport,
+  SpendByRetailerReport,
+} from "../types";
+import { isoDate, monthEnd, monthLabel, monthStart, shiftMonth } from "../lib/dates";
+import { Panel } from "../components/Panel";
+import { SpendTrendChart } from "../components/charts/SpendTrendChart";
+import { BreakdownChart } from "../components/charts/BreakdownChart";
+import { colorForRetailer } from "../lib/chartTheme";
 
 export function ReportsPage() {
   const navigate = useNavigate();
@@ -36,6 +33,10 @@ export function ReportsPage() {
   const [txns, setTxns] = useState<RetailerTransaction[]>([]);
   const [items, setItems] = useState<OrderItem[]>([]);
 
+  const [trend, setTrend] = useState<SpendByMonthReport | null>(null);
+  const [byRetailer, setByRetailer] = useState<SpendByRetailerReport | null>(null);
+  const [byCategory, setByCategory] = useState<SpendByCategoryReport | null>(null);
+
   const startDate = useMemo(() => isoDate(monthStart(selectedMonth)), [selectedMonth]);
   const endDate = useMemo(() => isoDate(monthEnd(selectedMonth)), [selectedMonth]);
 
@@ -45,16 +46,28 @@ export function ReportsPage() {
     Promise.all([
       listOrders({ start_date: startDate, end_date: endDate, search, limit: 5000 }),
       listTransactions({ start_date: startDate, end_date: endDate, search, limit: 5000 }),
-      listItems({ start_date: startDate, end_date: endDate, search, limit: 5000 })
+      listItems({ start_date: startDate, end_date: endDate, search, limit: 5000 }),
+      getSpendByRetailer({ start_date: startDate, end_date: endDate }),
+      getSpendByCategory({ start_date: startDate, end_date: endDate }),
     ])
-      .then(([o, t, i]) => {
+      .then(([o, t, i, byR, byC]) => {
         setOrders(o.rows);
         setTxns(t.rows);
         setItems(i.rows);
+        setByRetailer(byR);
+        setByCategory(byC);
       })
       .catch(() => setError("Failed to load report data"))
       .finally(() => setLoading(false));
   }, [startDate, endDate, search]);
+
+  useEffect(() => {
+    const trendStart = isoDate(monthStart(shiftMonth(new Date(), -11)));
+    const trendEnd = isoDate(new Date());
+    getSpendByMonth({ start_date: trendStart, end_date: trendEnd })
+      .then(setTrend)
+      .catch(() => setTrend(null));
+  }, []);
 
   const monthlyNetCents = useMemo(
     () => txns.reduce((sum, t) => sum + (t.amount_cents ?? 0), 0),
@@ -122,6 +135,32 @@ export function ReportsPage() {
           <p>Transactions: <strong>{txns.length}</strong></p>
           <p>Items: <strong>{items.length}</strong></p>
         </article>
+      </div>
+
+      <Panel className="chart-panel">
+        <h3>Spend Trend (Trailing 12 Months)</h3>
+        {trend ? <SpendTrendChart months={trend.months} retailers={trend.retailers} /> : null}
+      </Panel>
+
+      <div className="dashboard-charts-grid">
+        <Panel className="chart-panel">
+          <h3>By Retailer — {monthLabel(selectedMonth)}</h3>
+          {byRetailer ? (
+            <BreakdownChart
+              items={byRetailer.retailers.map((r) => ({ name: r.retailer, valueCents: r.net_amount_cents }))}
+              colorFor={colorForRetailer}
+            />
+          ) : null}
+        </Panel>
+
+        <Panel className="chart-panel">
+          <h3>By Category — {monthLabel(selectedMonth)}</h3>
+          {byCategory ? (
+            <BreakdownChart
+              items={byCategory.rows.map((r) => ({ name: r.name, valueCents: r.net_amount_cents }))}
+            />
+          ) : null}
+        </Panel>
       </div>
 
       <article className="panel">

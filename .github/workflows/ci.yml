@@ -24,17 +24,17 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Lint (ruff)
-        run: ruff check amazon_spending tests
+        run: ruff check budget_buddy tests
 
       - name: Type check (mypy)
-        run: mypy amazon_spending
+        run: mypy budget_buddy
 
       - name: Run tests (pytest)
         run: python -m pytest
 
       - name: Security scan (bandit)
         # B608 flags parameterized SQL and PRAGMA statements as injection risks (false positives)
-        run: bandit -r amazon_spending -ll -q --skip B608
+        run: bandit -r budget_buddy -ll -q --skip B608
 
   frontend:
     name: Frontend – build, lint & scan

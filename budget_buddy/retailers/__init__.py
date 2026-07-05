@@ -4,7 +4,7 @@ Each retailer is represented by a RetailerCollector subclass. Add new retailers
 by implementing RetailerCollector in a new module and registering it here.
 
 Usage:
-    from amazon_spending.retailers import REGISTRY
+    from budget_buddy.retailers import REGISTRY
     result = REGISTRY["amazon"].collect(conn, output_dir, order_limit=50)
 """
 
